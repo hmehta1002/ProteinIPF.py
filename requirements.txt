@@ -1,5 +1,5 @@
 streamlit
 pandas
-networkx
 plotly
 requests
+py3Dmol
