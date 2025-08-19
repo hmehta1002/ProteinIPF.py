@@ -16,11 +16,13 @@ def render_structure(uniprot_id, pdb_id=None, variants=None):
 
         if response.ok:
             pdb_data = response.text
-            viewer = py3Dmol.view(width=600, height=400)
+            viewer = py3Dmol.view(width=700, height=500)
             viewer.addModel(pdb_data, "pdb")
             viewer.setStyle({"cartoon": {"color": "spectrum"}})
 
-            # Variant highlighting (red sticks)
+            # -------------------
+            # Variant highlighting
+            # -------------------
             if variants:
                 for v in variants:
                     try:
@@ -28,10 +30,30 @@ def render_structure(uniprot_id, pdb_id=None, variants=None):
                     except:
                         pass
 
-            viewer.zoomTo()
-            st.components.v1.html(viewer._make_html(), height=500)
+            # -------------------
+            # Ligand highlighting
+            # -------------------
+            for line in pdb_data.splitlines():
+                if line.startswith("HETATM"):
+                    try:
+                        resi_num = int(line[22:26].strip())
+                        viewer.addStyle({"resi": resi_num}, {"sphere": {"color": "yellow"}})
+                    except:
+                        pass
 
+            # -------------------
+            # Chain coloring (simple example: A=blue, B=green, C=orange)
+            # -------------------
+            chains = set([line[21] for line in pdb_data.splitlines() if line.startswith("ATOM")])
+            chain_colors = ["blue", "green", "orange", "purple", "cyan"]
+            for i, ch in enumerate(chains):
+                color = chain_colors[i % len(chain_colors)]
+                viewer.addStyle({"chain": ch}, {"cartoon": {"color": color}})
+
+            viewer.zoomTo()
+            st.components.v1.html(viewer._make_html(), height=550)
             st.markdown(f"🔗 [Open in RCSB PDB Viewer](https://www.rcsb.org/structure/{pdb_id})")
+
         else:
             st.error("Could not fetch PDB file.")
     else:
@@ -42,10 +64,8 @@ def render_structure(uniprot_id, pdb_id=None, variants=None):
 
         if response.ok:
             pdb_data = response.text
-            viewer = py3Dmol.view(width=600, height=400)
+            viewer = py3Dmol.view(width=700, height=500)
             viewer.addModel(pdb_data, "pdb")
-
-            # Color by confidence (pLDDT)
             viewer.setStyle({"cartoon": {"color": "spectrum"}})
 
             # Variant highlighting
@@ -57,15 +77,13 @@ def render_structure(uniprot_id, pdb_id=None, variants=None):
                         pass
 
             viewer.zoomTo()
-            st.components.v1.html(viewer._make_html(), height=500)
-
-            # External link
+            st.components.v1.html(viewer._make_html(), height=550)
             st.markdown(
                 f"🔗 [Open in AlphaFold Viewer](https://www.alphafold.ebi.ac.uk/entry/{uniprot_id})"
             )
 
             # -------------------
-            # Novel feature: Extract confidence values
+            # pLDDT extraction & plotting
             # -------------------
             plDDT_scores = []
             for line in pdb_data.splitlines():
@@ -97,7 +115,9 @@ This novel app helps researchers explore **Idiopathic Pulmonary Fibrosis (IPF)-r
 - 📂 Upload CSV with **miRNA–Gene–Protein** interactions  
 - 🎨 Visualize **PDB or AlphaFold models**  
 - 🧬 Highlight **variants**  
-- 🌀 NEW: Map **intrinsic disorder regions** using AlphaFold pLDDT scores
+- 🟡 Highlight **ligands/cofactors**  
+- 🌀 NEW: Map **intrinsic disorder regions** using AlphaFold pLDDT scores  
+- 🌈 Color **chains/domains** for clarity
 """)
 
 # -------------------------------
@@ -120,7 +140,6 @@ if st.button("Search Protein"):
         }
 
         pdb_id = pdb_lookup.get(query_upper, None)
-
         render_structure(query_upper, pdb_id, variants)
     else:
         st.error("Please enter a valid protein name or UniProt ID.")
@@ -150,4 +169,3 @@ if uploaded_file:
 
     except Exception as e:
         st.error(f"Error reading CSV: {e}")
-
