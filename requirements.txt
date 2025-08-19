@@ -1,6 +1,9 @@
-streamlit==1.26.0
-py3Dmol==2.0.0
+streamlit==1.29.0
+py3Dmol==2.0.3
 biopython==1.81
 requests==2.31.0
+pandas==2.1.0
 matplotlib==3.8.0
-pandas==2.1.1
+plotly==5.17.0
+streamlit-aggrid==0.4.3
+openpyxl==3.1.3
