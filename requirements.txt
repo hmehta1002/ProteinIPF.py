@@ -1,4 +1,5 @@
-streamlit
-py3Dmol
-biopython
+streamlit>=1.33
+pandas
 requests
+py3Dmol
+matplotlib
