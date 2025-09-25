@@ -15,13 +15,14 @@ from collections import deque, defaultdict
 # Config / Helpers
 # -------------------------------
 st.set_page_config(page_title="IPF Structure & Network Lab", layout="wide")
-st.title("🫁 IPF Protein Structure & Network Explorer — Enhanced")
+st.title("🫁 IPF Protein Structure & Network Explorer — Enhanced (v2)")
 
 # Small CSS to tighten UI
 st.markdown("""
 <style>
 .reportview-container .main .block-container{padding-top:0rem;}
 .small-note {font-size:0.9rem; color:#444;}
+.code-note {font-size:0.85rem; color:#666; font-family: monospace;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,48 +63,85 @@ def uniprot_lookup_by_gene(gene_symbol: str) -> Dict:
 # -------------------------------
 # Structure rendering (py3Dmol)
 # -------------------------------
-def render_structure(uniprot_id: str, pdb_id: Optional[str] = None, variants: Optional[List[str]] = None, highlight_neighbors: Optional[List[int]] = None):
+def render_structure(uniprot_id: str,
+                     pdb_id: Optional[str] = None,
+                     variants: Optional[List[int]] = None,
+                     highlight_neighbors: Optional[List[int]] = None,
+                     viewer_width: int = 760,
+                     viewer_height: int = 520):
+    """
+    Render a protein structure using py3Dmol inside Streamlit.
+    - uniprot_id: gene symbol or UniProt accession (we accept either)
+    - pdb_id: optional PDB id to prefer experimental structure
+    - variants: optional list of residue indices (ints) to highlight (red)
+    - highlight_neighbors: optional list of residue indices to mark as neighbors (orange spheres)
+    """
     st.subheader(f"Protein Structure Viewer: {uniprot_id}")
     pdb_data = None
+    used_pdb_id = None
+
+    # 1) Try user-supplied PDB
     if pdb_id:
         pdb_url = f"https://files.rcsb.org/view/{pdb_id}.pdb"
         pdb_data = fetch_text(pdb_url)
-        if not pdb_data:
-            st.warning("Could not fetch PDB file, falling back to AlphaFold.")
-            pdb_id = None
+        if pdb_data:
+            used_pdb_id = pdb_id
+        else:
+            st.info("Could not fetch PDB file for provided PDB ID; will attempt AlphaFold.")
 
+    # 2) If no PDB or failed, try AlphaFold using uniprot accession or gene symbol
     if not pdb_data:
-        af_url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v4.pdb"
+        # If the user passed a gene symbol, first try to lookup UniProt accession
+        accession = uniprot_id
+        if not uniprot_id.startswith("Q") and not uniprot_id.startswith("P") and len(uniprot_id) < 7:
+            meta = uniprot_lookup_by_gene(uniprot_id)
+            if meta and meta.get('accession'):
+                accession = meta['accession']
+        af_url = f"https://alphafold.ebi.ac.uk/files/AF-{accession}-F1-model_v4.pdb"
         pdb_data = fetch_text(af_url)
-        if not pdb_data:
-            st.error("No structure available (PDB or AlphaFold).")
+        if pdb_data:
+            used_pdb_id = None  # indicates AlphaFold
+            uniprot_id = accession
+        else:
+            st.error("No structure available (PDB or AlphaFold). Try a UniProt accession or a different PDB ID.")
             return
 
-    # 3D viewer
+    # 3) Render with py3Dmol
     try:
-        viewer = py3Dmol.view(width=760, height=520)
+        viewer = py3Dmol.view(width=viewer_width, height=viewer_height)
         viewer.addModel(pdb_data, "pdb")
         viewer.setStyle({"cartoon": {"color": "spectrum"}})
 
-        # highlight variant residues
+        # highlight variant residues (red sticks + spheres)
         if variants:
             for v in variants:
                 try:
                     ires = int(v)
-                    viewer.addStyle({"resi": ires}, {"stick": {"colorscheme": "redCarbon"}})
-                except:
+                    viewer.addStyle({"resi": ires}, {"stick": {"color": "red", "radius": 0.2}})
+                    viewer.addStyle({"resi": ires}, {"sphere": {"color": "red", "radius": 0.6}})
+                except Exception:
                     pass
 
-        # highlight HETATM ligands
-        for line in pdb_data.splitlines():
-            if line.startswith("HETATM"):
-                try:
-                    resi = int(line[22:26].strip())
-                    viewer.addStyle({"resi": resi}, {"stick": {"color": "green"}})
-                except:
-                    pass
+        # highlight HETATM ligands (green sticks)
+        # HETATM may not have canonical residue mapping; fallback methods included
+        try:
+            for line in pdb_data.splitlines():
+                if line.startswith("HETATM"):
+                    # RCSB PDB format: columns 23-26 usually residue sequence number
+                    # attempt parsing robustly
+                    try:
+                        resi_field = line[22:26].strip()
+                        resi = int(resi_field)
+                        viewer.addStyle({"resi": resi}, {"stick": {"color": "green"}})
+                    except:
+                        # if failed, try using hetflag selector
+                        pass
+            # also set any hetflag atoms to green sticks (broad selector)
+            viewer.addStyle({"hetflag": True}, {"stick": {"color": "green"}})
+        except Exception:
+            pass
 
-        # highlight neighbor residues (list of ints)
+        # highlight neighbor residues (orange spheres)
         if highlight_neighbors:
             for resi in highlight_neighbors:
                 try:
@@ -112,24 +150,29 @@ def render_structure(uniprot_id: str, pdb_id: Optional[str] = None, variants: Op
                     pass
 
         viewer.zoomTo()
-        st.components.v1.html(viewer._make_html(), height=560)
+        # Display inside Streamlit
+        st.components.v1.html(viewer._make_html(), height=viewer_height + 40)
+
     except Exception as e:
         st.error(f"3D viewer failed: {e}")
+        return
 
-    # External link
-    if pdb_id:
-        st.markdown(f"🔗 [Open in RCSB PDB Viewer](https://www.rcsb.org/structure/{pdb_id})")
+    # 4) External links and notes
+    if used_pdb_id:
+        st.markdown(f"🔗 [Open in RCSB PDB Viewer](https://www.rcsb.org/structure/{used_pdb_id})")
     else:
         st.markdown(f"🔗 [Open in AlphaFold Viewer](https://www.alphafold.ebi.ac.uk/entry/{uniprot_id})")
 
-    # pLDDT plotting
+    # 5) pLDDT/B-factor plotting
     plDDT_scores = []
+    # AlphaFold stores pLDDT in B-factor column of ATOM lines (cols 61-66 in traditional PDB)
     for line in pdb_data.splitlines():
         if line.startswith("ATOM"):
             try:
                 score = float(line[60:66].strip())
                 plDDT_scores.append(score)
             except:
+                # ignore parsing errors
                 pass
 
     if plDDT_scores:
@@ -146,7 +189,14 @@ def render_structure(uniprot_id: str, pdb_id: Optional[str] = None, variants: Op
 # -------------------------------
 # Network building & analytics (no networkx)
 # -------------------------------
-def build_tripartite_edges(df: pd.DataFrame) -> Tuple[List[Tuple[str,str,str]], Dict[str,int]]:
+def build_tripartite_edges(df: pd.DataFrame) -> Tuple[List[Tuple[str,str,str]], Dict[str,int], Dict[str,List[int]]]:
+    """
+    Build tripartite edges and return:
+     - edge_list: list of tuples (source, target, type)
+     - degree: dict node->degree
+     - variant_map: dict protein->list of residue ints (from optional 'Variants' column)
+    Expects columns: miRNA,Gene,Protein. Optional: Variants (e.g., '45;76;112')
+    """
     required = ['miRNA','Gene','Protein']
     for c in required:
         if c not in df.columns:
@@ -155,6 +205,32 @@ def build_tripartite_edges(df: pd.DataFrame) -> Tuple[List[Tuple[str,str,str]], 
     df['miRNA'] = df['miRNA'].astype(str).str.strip()
     df['Gene'] = df['Gene'].astype(str).str.strip()
     df['Protein'] = df['Protein'].astype(str).str.strip()
+
+    # parse optional Variants column
+    variant_map: Dict[str,List[int]] = {}
+    if 'Variants' in df.columns:
+        for _, row in df.iterrows():
+            prot = str(row.get('Protein','')).strip().upper()
+            varcell = str(row.get('Variants','')).strip()
+            if prot and varcell and varcell != 'nan':
+                # support semicolon or comma separated
+                parts = [p for delim in [';',' ',','] for p in varcell.split(delim)] if ';' in varcell or ',' in varcell else varcell.split()
+                # fallback simpler split by ; or , or space
+                if ';' in varcell:
+                    parts = [p.strip() for p in varcell.split(';') if p.strip()]
+                elif ',' in varcell:
+                    parts = [p.strip() for p in varcell.split(',') if p.strip()]
+                else:
+                    parts = [p.strip() for p in varcell.split() if p.strip()]
+                ints = []
+                for p in parts:
+                    try:
+                        ints.append(int(p))
+                    except:
+                        pass
+                if ints:
+                    variant_map[prot] = ints
+
     edges = []
     nodes = set()
     for _, row in df.iterrows():
@@ -171,7 +247,7 @@ def build_tripartite_edges(df: pd.DataFrame) -> Tuple[List[Tuple[str,str,str]], 
     for a,b,_ in edges:
         degree[a] = degree.get(a,0) + 1
         degree[b] = degree.get(b,0) + 1
-    return edges, degree
+    return edges, degree, variant_map
 
 def connected_components(edge_list: List[Tuple[str,str,str]]) -> List[set]:
     # undirected adjacency
@@ -223,8 +299,9 @@ def betweenness_centrality(edge_list: List[Tuple[str,str,str]]) -> Dict[str,floa
         delta = dict.fromkeys(nodes, 0.0)
         for w in reversed(S):
             for v in P[w]:
-                delta_v = (sigma[v]/sigma[w]) * (1 + delta[w])
-                delta[v] += delta_v
+                if sigma[w] != 0:
+                    delta_v = (sigma[v]/sigma[w]) * (1 + delta[w])
+                    delta[v] += delta_v
             if w != s:
                 CB[w] += delta[w]
     # normalize for undirected graph: divide by 2 for pairs
@@ -243,20 +320,28 @@ def circular_positions(nodes: List[str]) -> Dict[str, Tuple[float,float]]:
         pos[node] = (math.cos(angle), math.sin(angle))
     return pos
 
-def plot_network(edge_list: List[Tuple[str,str,str]], degree: Dict[str,int], highlight_nodes: Optional[List[str]] = None, title: str = "miRNA–Gene–Protein Network"):
+def plot_network(edge_list: List[Tuple[str,str,str]], degree: Dict[str,int], highlight_nodes: Optional[List[str]] = None, inferred_ppi: Optional[List[Tuple[str,str]]] = None, title: str = "miRNA–Gene–Protein Network"):
     nodes = sorted(list({n for e in edge_list for n in (e[0], e[1])}))
     if not nodes:
         fig, ax = plt.subplots()
         ax.text(0.5,0.5,"No network to display", ha='center')
-        return fig
+        return fig, {}
     pos = circular_positions(nodes)
     fig, ax = plt.subplots(figsize=(8,8))
     ax.axis('off')
     max_deg = max(degree.values()) if degree else 1
+    # draw edges (directed types)
     for a,b,etype in edge_list:
         x1,y1 = pos[a]; x2,y2 = pos[b]
         color = 'tab:blue' if 'miRNA' in etype else 'tab:green'
         ax.plot([x1,x2],[y1,y2], color=color, alpha=0.6, linewidth=0.8)
+    # draw inferred PPIs if provided (as dashed gray)
+    if inferred_ppi:
+        for p,q in inferred_ppi:
+            if p in pos and q in pos:
+                x1,y1 = pos[p]; x2,y2 = pos[q]
+                ax.plot([x1,x2],[y1,y2], color='gray', linestyle='--', alpha=0.5, linewidth=0.7)
+    # nodes
     for node in nodes:
         x,y = pos[node]
         deg = degree.get(node,0)
@@ -279,12 +364,12 @@ def plot_network(edge_list: List[Tuple[str,str,str]], degree: Dict[str,int], hig
 # -------------------------------
 # Sample dataset generator
 # -------------------------------
-SAMPLE_CSV = """miRNA,Gene,Protein
-hsa-miR-21,TGFB1,TGFB1
-hsa-miR-29,COL1A1,COL1A1
-hsa-miR-200c,ZEB1,ZEB1
-hsa-miR-155,MMP7,MMP7
-hsa-miR-326,TERT,TERT
+SAMPLE_CSV = """miRNA,Gene,Protein,Variants
+hsa-miR-21,TGFB1,TGFB1,45;76;112
+hsa-miR-29,COL1A1,COL1A1,
+hsa-miR-200c,ZEB1,ZEB1,
+hsa-miR-155,MMP7,MMP7,
+hsa-miR-326,TERT,TERT,
 """
 
 def sample_csv_download_button():
@@ -302,7 +387,7 @@ if st.sidebar.button("Download sample CSV"):
     sample_csv_download_button()
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Tips:** Upload CSV with columns `miRNA,Gene,Protein` (headers required). Use UniProt accession in Protein column for best AlphaFold linking.")
+st.sidebar.markdown("**Tips:** Upload CSV with columns `miRNA,Gene,Protein` (headers required). Optional `Variants` column uses `;` or `,` separator (e.g., 45;76;112). Use UniProt accession in Protein column for best AlphaFold linking.")
 
 # -------------------------------
 # Single Protein Mode
@@ -312,10 +397,11 @@ if mode == "Single Protein":
     col1, col2 = st.columns([3,1])
     with col1:
         query = st.text_input("Protein name or UniProt ID (e.g., TGFB1 or Q9HC84)", value="")
-        var_in = st.text_input("Comma-separated variant residue numbers (optional)", value="")
+        var_in = st.text_input("Comma/semicolon-separated variant residue numbers (optional)", value="")
+        pdb_input = st.text_input("Optional PDB ID (e.g., 1KLC)", value="")
     with col2:
         st.markdown("**Options**")
-        pdb_input = st.text_input("Optional PDB ID (e.g., 1D5R)", value="")
+        st.markdown("Use the controls to fetch structure and visualize variants/HETATM.")
         if st.button("Lookup UniProt metadata"):
             if query:
                 meta = uniprot_lookup_by_gene(query.strip())
@@ -327,7 +413,17 @@ if mode == "Single Protein":
         if not query:
             st.error("Enter a protein gene symbol or UniProt accession.")
         else:
-            variants = [v.strip() for v in var_in.split(",")] if var_in else None
+            # parse variants from input if provided
+            variants = None
+            if var_in and var_in.strip():
+                parts = [p.strip() for delim in [';'] for p in var_in.split(delim)] if ';' in var_in else [p.strip() for p in var_in.split(',')] if ',' in var_in else var_in.split()
+                ints = []
+                for p in parts:
+                    try:
+                        ints.append(int(p))
+                    except:
+                        pass
+                variants = ints if ints else None
             pid = pdb_input.strip() if pdb_input else None
             render_structure(query.strip().upper(), pdb_id=pid, variants=variants)
 
@@ -345,6 +441,8 @@ elif mode == "Batch CSV":
             st.markdown("**Preview (first 20 rows)**")
             st.dataframe(df.head(20))
             st.markdown("**Row actions:** Click to view structure for that row's protein.")
+            # build variant map so we can auto-highlight if present
+            _, _, variant_map = build_tripartite_edges(df)
             for idx,row in df.iterrows():
                 cols = st.columns([4,1])
                 with cols[0]:
@@ -352,16 +450,11 @@ elif mode == "Batch CSV":
                 with cols[1]:
                     if st.button("View structure", key=f"view_{idx}"):
                         protein = str(row.get('Protein','')).upper()
-                        # try UniProt lookup for accession
-                        meta = uniprot_lookup_by_gene(str(row.get('Gene','')).upper())
-                        pdb_lookup = {"PTEN":"1D5R","AKT1":"4EKL"}
+                        pdb_lookup = {}  # small mapping if desired
                         pdb_id = pdb_lookup.get(protein, None)
-                        if meta and 'accession' in meta and not protein.startswith("Q"):
-                            # if user provided gene, ask to use accession
-                            try_use = st.radio("Use UniProt accession from lookup?", ["Use provided Protein column", f"Use accession {meta['accession']}"], index=0, key=f"acc_choice_{idx}")
-                            if try_use.startswith("Use accession"):
-                                protein = meta['accession']
-                        render_structure(protein, pdb_id)
+                        # try variant map
+                        variants = variant_map.get(protein, None)
+                        render_structure(protein, pdb_id, variants=variants)
             # allow download of original file
             csv_bytes = df.to_csv(index=False).encode('utf-8')
             b64 = base64.b64encode(csv_bytes).decode()
@@ -374,7 +467,7 @@ elif mode == "Batch CSV":
 # -------------------------------
 elif mode == "Network Explorer":
     st.header("🕸 Network Explorer — build tripartite network from CSV")
-    upload = st.file_uploader("Upload CSV (miRNA,Gene,Protein)", type="csv", key="netfile")
+    upload = st.file_uploader("Upload CSV (miRNA,Gene,Protein) — optional 'Variants' column supported", type="csv", key="netfile")
     if upload:
         try:
             df = pd.read_csv(upload)
@@ -382,13 +475,34 @@ elif mode == "Network Explorer":
             st.subheader("Input preview")
             st.dataframe(df.head(50))
 
-            # build edges and degree
-            edge_list, degree = build_tripartite_edges(df)
+            # build edges, degree, and variant map
+            edge_list, degree, variant_map = build_tripartite_edges(df)
             st.subheader("Network statistics")
             comps = connected_components(edge_list)
             st.markdown(f"- Nodes: **{len(degree)}**")
             st.markdown(f"- Edges: **{len(edge_list)}**")
             st.markdown(f"- Connected components: **{len(comps)}** (largest size: {max(len(c) for c in comps)})")
+
+            # optional inferred PPIs: when the same miRNA targets multiple genes,
+            # create inferred protein-protein edges among their proteins (simple inference)
+            infer_ppi = st.checkbox("Infer protein–protein edges from shared miRNA targets (inferred PPIs)", value=False)
+            inferred_ppi = []
+            if infer_ppi:
+                # build map miRNA -> proteins (via gene->protein)
+                mi_to_prots = defaultdict(set)
+                for mi,gene,ptype in edge_list:
+                    if ptype == 'miRNA->Gene':
+                        # find proteins encoded by that gene from edge_list
+                        gene_name = gene
+                        for a,b,t in edge_list:
+                            if a == gene_name and t == 'Gene->Protein':
+                                mi_to_prots[mi].add(b)
+                # for each miRNA, connect its proteins pairwise
+                for mi, prots in mi_to_prots.items():
+                    prots = list(prots)
+                    for i in range(len(prots)):
+                        for j in range(i+1, len(prots)):
+                            inferred_ppi.append((prots[i], prots[j]))
 
             # compute betweenness centrality (may take time for large graphs)
             if st.button("Compute betweenness centrality (naive; may be slow)"):
@@ -397,6 +511,12 @@ elif mode == "Network Explorer":
                     bcd = pd.DataFrame(list(bc.items()), columns=['Node','Betweenness']).sort_values('Betweenness', ascending=False)
                     st.subheader("Top betweenness nodes")
                     st.dataframe(bcd.head(20))
+                    # store bc for use below
+                    top_bc_nodes = bcd.head(10)['Node'].tolist()
+            else:
+                bc = {}
+                top_bc_nodes = []
+
             # show degree table
             ddf = pd.DataFrame(list(degree.items()), columns=['Node','Degree']).sort_values('Degree', ascending=False)
             st.subheader("Top degree nodes")
@@ -418,19 +538,36 @@ elif mode == "Network Explorer":
                     if b == node_choice:
                         neighbors.add(a)
                 highlight_nodes = [node_choice] + list(neighbors)
-                fig,pos = plot_network(edge_list, degree, highlight_nodes, title=plot_title)
+                fig,pos = plot_network(edge_list, degree, highlight_nodes, inferred_ppi, title=plot_title)
             else:
-                fig,pos = plot_network(edge_list, degree, None, title=plot_title)
+                fig,pos = plot_network(edge_list, degree, None, inferred_ppi, title=plot_title)
             st.pyplot(fig)
 
-            # allow node->structure quick view (via selectbox)
+            # Quick view a protein (top protein nodes)
             prot_nodes = [n for n in ddf['Node'].tolist() if n.isupper() and len(n)<=10]
             if prot_nodes:
+                st.markdown("---")
+                st.subheader("Quick structural inspection")
                 sel_prot = st.selectbox("Quick view a protein (top nodes)", options=[None]+prot_nodes)
+                auto_topk = st.number_input("Or auto-highlight top-k betweenness proteins (k)", min_value=0, max_value=10, value=0, step=1)
                 if sel_prot:
-                    pdb_map = {"PTEN":"1D5R","AKT1":"4EKL"}
+                    # check for variants mapping
+                    pdb_map = {"PTEN":"1D5R","AKT1":"4EKL"}  # example mapping
                     pdbid = pdb_map.get(sel_prot, None)
-                    render_structure(sel_prot, pdb_id=pdbid, variants=None, highlight_neighbors=None)
+                    variants = variant_map.get(sel_prot, None)
+                    render_structure(sel_prot, pdb_id=pdbid, variants=variants, highlight_neighbors=None)
+                elif auto_topk and bc:
+                    # render first top-k BC proteins sequentially (show one at a time for simplicity)
+                    bcd = pd.DataFrame(list(bc.items()), columns=['Node','Betweenness']).sort_values('Betweenness', ascending=False)
+                    avail = [n for n in bcd['Node'].tolist() if n.isupper() and len(n)<=10]
+                    count = min(auto_topk, len(avail))
+                    if count == 0:
+                        st.info("No top-k proteins available for automatic highlighting (ensure betweenness was computed and proteins are available).")
+                    else:
+                        chosen = avail[0]  # show top-1 by default
+                        st.info(f"Rendering top betweenness protein: {chosen}")
+                        variants = variant_map.get(chosen, None)
+                        render_structure(chosen, pdb_id=None, variants=variants, highlight_neighbors=None)
 
             # exports
             st.markdown("---")
@@ -453,6 +590,8 @@ elif mode == "Network Explorer":
                 href = f'<a href="data:image/png;base64,{b64png}" download="ipf_network.png">⬇️ Download network PNG</a>'
                 st.markdown(href, unsafe_allow_html=True)
 
+            # pLDDT export note: if pLDDT plot exists (user rendered a structure), capture it from matplotlib plot code path (user can click structure first)
+            st.markdown("**Note:** To capture a 3D structure image, use your browser's screenshot tool (py3Dmol is interactive in-browser). pLDDT plots and network PNGs can be exported directly.")
         except Exception as e:
             st.error(f"Could not build network: {e}")
 
@@ -473,6 +612,13 @@ elif mode == "Demo & Tutorial":
     st.markdown("---")
     st.markdown("**Example CSV**")
     st.code(SAMPLE_CSV, language='csv')
+    st.markdown("---")
+    st.markdown("**Tips for taking figures**")
+    st.markdown("""
+    - For **3D structure screenshots**, rotate the model in the viewer to show the highlighted residues and ligands clearly, then use your OS/browser screenshot tool for high-quality images.
+    - Use the **Export network plot as PNG** button for static network figures.
+    - If you want to batch-generate structural snapshots, run the py3Dmol rendering locally in a Jupyter/Colab environment and capture programmatically.
+    """)
 
 # -------------------------------
 # About
@@ -487,11 +633,13 @@ else:
     - CSV-first workflow for reproducibility.
     - Rapid integration of network prioritization and structure inspection.
 
-    Limitations & future improvements (if you allow package changes):
-    - Add `networkx` for advanced layouts and analytics.
-    - Add `plotly` or D3 for interactive network visualization.
-    - Add UniProt/STRING detailed annotation caching and pathway enrichment.
+    Limitations & future improvements:
+    - Add `networkx` for advanced layouts and analytics (optional).
+    - Add interactive D3/plotly visualizations for large networks.
+    - Add STRING/IntAct PPI lookup for validated protein–protein edges.
+    - Add optional docking module to evaluate small-molecule interactions.
     """)
+    st.markdown("**How variant mapping works:** include an optional `Variants` column in your CSV with values like `45;76;112` (residue indices). These will be highlighted in the structure viewer if available.")
 
 # -------------------------------
 # Footer / contact
