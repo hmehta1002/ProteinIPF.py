@@ -4,3 +4,4 @@ biopython
 pandas
 matplotlib
 requests
+networkx
