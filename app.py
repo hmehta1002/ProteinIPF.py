@@ -30,7 +30,7 @@ except Exception:
 # Page config & header
 # -------------------------
 st.set_page_config(page_title="Protein Network Explorer", layout="wide")
-st.markdown("<h1 style='text-align:center; color:#4B0082;'>🧬 Protein Network Explorer — Complete</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center; color:#4B0082;'>🧬 Protein Network Explorer </h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center; color:#6A5ACD;'>All features included — mock intrinsic-disorder map + sequence heuristics retained.</p>", unsafe_allow_html=True)
 
 # -------------------------
