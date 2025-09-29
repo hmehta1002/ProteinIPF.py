@@ -13,26 +13,32 @@ st.set_page_config(page_title="IPF Disorder-Weighted PPI Explorer", layout="wide
 # ---------------------------- Helper Functions ----------------------------
 @st.cache_data
 def fetch_uniprot_info(protein_id):
-    url = f"https://rest.uniprot.org/uniprotkb/{protein_id}.json"
-    resp = requests.get(url)
-    time.sleep(0.2)
-    if resp.status_code==200:
-        return resp.json()
+    try:
+        url = f"https://rest.uniprot.org/uniprotkb/{protein_id}.json"
+        resp = requests.get(url)
+        time.sleep(0.2)
+        if resp.status_code == 200:
+            return resp.json()
+    except:
+        pass
     return None
 
 @st.cache_data
 def fetch_alphafold_structure(protein_id):
-    url = f"https://alphafold.ebi.ac.uk/files/AF-{protein_id}-F1-model_v4.pdb"
-    resp = requests.get(url)
-    time.sleep(0.5)
-    if resp.status_code==200:
-        return resp.text
+    try:
+        url = f"https://alphafold.ebi.ac.uk/files/AF-{protein_id}-F1-model_v4.pdb"
+        resp = requests.get(url)
+        time.sleep(0.5)
+        if resp.status_code == 200:
+            return resp.text
+    except:
+        pass
     return None
 
 @st.cache_data
 def fetch_string_edges(proteins):
     edges = []
-    for i,p1 in enumerate(proteins):
+    for i, p1 in enumerate(proteins):
         for p2 in proteins[i+1:]:
             edges.append({'Protein1': p1, 'Protein2': p2})
     return pd.DataFrame(edges)
@@ -43,26 +49,26 @@ def compute_disorder(seq):
                 'Y':-1.3,'V':4.2}
     return np.array([max(min((aa_hydro.get(aa,0)+4.5)/9,1),0) for aa in seq])
 
-def compute_STKDD(disorder_avg, centrality, num_vulnerable):
+def compute_STKDD(disorder_avg, centrality, num_vulnerable=1):
     return disorder_avg * centrality * (1 + num_vulnerable)
 
 def compute_DMNFZ(G, disorder_dict):
     dmnfz = {}
     for n in G.nodes():
         neighs = list(G.neighbors(n))
-        if len(neighs)==0:
-            dmnfz[n]=0
+        if len(neighs) == 0:
+            dmnfz[n] = 0
             continue
         neighbor_disorders = [disorder_dict.get(neigh,0) for neigh in neighs]
         mean = np.mean(neighbor_disorders)
-        std = np.std(neighbor_disorders) if np.std(neighbor_disorders)>0 else 1
-        dmnfz[n] = (disorder_dict.get(n,0)-mean)/std
+        std = np.std(neighbor_disorders) if np.std(neighbor_disorders) > 0 else 1
+        dmnfz[n] = (disorder_dict.get(n,0) - mean) / std
     return dmnfz
 
 def compute_DFWMIN(G, disorder_dict, stkdd_dict):
     flux_dict = {}
     for u,v in G.edges():
-        flux_dict[(u,v)] = ((disorder_dict.get(u,0)+disorder_dict.get(v,0))/2) * ((stkdd_dict.get(u,0)+stkdd_dict.get(v,0))/2)
+        flux_dict[(u,v)] = ((disorder_dict.get(u,0) + disorder_dict.get(v,0))/2) * ((stkdd_dict.get(u,0) + stkdd_dict.get(v,0))/2)
     return flux_dict
 
 def plot_network(G, pos, metric_dict, metric_name="STKDD", node_threshold=0, highlight_nodes=[], edge_filter=None):
@@ -116,38 +122,84 @@ with tabs[0]:
         st.success("FASTA sequences loaded")
         st.dataframe(pd.DataFrame({'Protein': list(seq_dict.keys()), 'Length':[len(seq) for seq in seq_dict.values()]}))
 
+        # Initialize metrics after upload
+        proteins = list(seq_dict.keys())
+        df_edges = fetch_string_edges(proteins)
+        df_edges['Confidence'] = np.random.randint(50,101,size=len(df_edges))
+        G = nx.from_pandas_edgelist(df_edges, 'Protein1', 'Protein2', edge_attr='Confidence')
+        st.session_state['G'] = G
+        st.session_state['df_edges'] = df_edges
+        st.session_state['disorder_dict'] = {p: np.mean(compute_disorder(seq)) for p, seq in seq_dict.items()}
+        degree_c = dict(G.degree())
+        st.session_state['stkdd_dict'] = {p: compute_STKDD(st.session_state['disorder_dict'][p], degree_c[p], 1) for p in G.nodes()}
+        st.session_state['flux_dict'] = compute_DFWMIN(G, st.session_state['disorder_dict'], st.session_state['stkdd_dict'])
+        st.session_state['pos'] = nx.spring_layout(G, seed=42)
+        st.success("Network & metrics initialized!")
 # ---------------------------- Tab 2: STRING Network ----------------------------
 with tabs[1]:
     st.header("Build PPI Network from STRING")
     if 'seq_dict' in st.session_state:
         proteins = list(st.session_state['seq_dict'].keys())
-        df_edges = fetch_string_edges(proteins)
+        
+        # ---- Fetch edges from STRING API ----
+        df_edges = fetch_string_edges(proteins)  # You can replace with real STRING API calls
+        
+        # Add placeholder "confidence score" (1-100) for demonstration
+        df_edges['Confidence'] = np.random.randint(50,101,size=len(df_edges))
+        
         st.session_state['df_edges'] = df_edges
-        G = nx.from_pandas_edgelist(df_edges, 'Protein1', 'Protein2')
+        G = nx.from_pandas_edgelist(df_edges, 'Protein1', 'Protein2', edge_attr='Confidence')
         st.session_state['G'] = G
-        st.success("PPI network built")
+        st.success("PPI network built with confidence scores")
         st.dataframe(df_edges)
 
 # ---------------------------- Tab 3: Network Map ----------------------------
 with tabs[2]:
-    st.header("Network Map with Filters")
-    if 'G' in st.session_state:
+    st.header("Interactive Network Map (with DFWMIN Edge Coloring)")
+    if 'G' in st.session_state and 'seq_dict' in st.session_state:
         G = st.session_state['G']
-        seq_dict = st.session_state['seq_dict']
-        disorder_dict = {n: np.mean(compute_disorder(seq_dict.get(n,''))) if seq_dict.get(n,'') else np.random.rand() for n in G.nodes()}
-        st.session_state['disorder_dict'] = disorder_dict
-        eig = nx.eigenvector_centrality(G, max_iter=500)
-        stkdd_dict = {n: compute_STKDD(disorder_dict[n], eig[n], 0) for n in G.nodes()}
-        st.session_state['stkdd_dict'] = stkdd_dict
-        flux_dict = compute_DFWMIN(G, disorder_dict, stkdd_dict)
-        st.session_state['flux_dict'] = flux_dict
-        pos = nx.spring_layout(G, seed=42)
-        st.session_state['pos'] = pos
+        pos = st.session_state['pos']
+        stkdd_dict = st.session_state['stkdd_dict']
+        flux_dict = st.session_state['flux_dict']
 
-        node_threshold = st.slider("STKDD Threshold Filter", 0.0, 1.0, 0.0, 0.01)
-        fig = plot_network(G, pos, stkdd_dict, metric_name="STKDD", node_threshold=node_threshold)
+        # Node filter
+        stkdd_thresh = st.slider("Filter nodes by STKDD", 0.0, max(stkdd_dict.values()), 0.0, 0.01)
+        filtered_nodes = [n for n,v in stkdd_dict.items() if v >= stkdd_thresh]
+        H = G.subgraph(filtered_nodes)
+
+        # Edge trace with DFWMIN color
+        edge_x, edge_y, edge_color, edge_text = [], [], [], []
+        for u,v in H.edges():
+            x0,y0 = pos[u]; x1,y1 = pos[v]
+            edge_x += [x0,x1,None]; edge_y += [y0,y1,None]
+            val = flux_dict.get((u,v), flux_dict.get((v,u), 0))
+            edge_color.append(val)
+            edge_text.append(f"{u}-{v}<br>DFWMIN: {val:.2f}")
+
+        edge_trace = go.Scatter(
+            x=edge_x, y=edge_y,
+            line=dict(width=2, color=edge_color, colorscale='Viridis', showscale=True, colorbar=dict(title='DFWMIN')),
+            hoverinfo='text',
+            text=edge_text,
+            mode='lines'
+        )
+
+        # Node trace
+        node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
+        for n in H.nodes():
+            x,y = pos[n]; node_x.append(x); node_y.append(y)
+            node_size.append(20 + stkdd_dict[n]*30)
+            node_color.append(stkdd_dict[n])
+            node_text.append(f"{n}<br>Disorder: {st.session_state['disorder_dict'][n]:.2f}<br>STKDD: {stkdd_dict[n]:.2f}")
+
+        node_trace = go.Scatter(
+            x=node_x, y=node_y, mode='markers+text', text=list(H.nodes()), textposition="top center",
+            hoverinfo='text', marker=dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title='STKDD'))
+        )
+
+        fig = go.Figure(data=[edge_trace, node_trace])
+        fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
-
 # ---------------------------- Tab 4: Network Metrics ----------------------------
 with tabs[3]:
     st.header("Network Metrics")
@@ -180,30 +232,65 @@ with tabs[5]:
         st.text(st.session_state['seq_dict'])
 
 # ---------------------------- Tab 7: Motifs / Domains ----------------------------
+# ---------------------------- Tab 7: Motifs / Domains ----------------------------
 with tabs[6]:
     st.header("Motifs & Domains")
     if 'seq_dict' in st.session_state:
+        if 'motif_color_map' not in st.session_state:
+            st.session_state['motif_color_map'] = {}
+        motif_color_map = st.session_state['motif_color_map']
+        color_palette = ['#FF5733','#33FF57','#3357FF','#F1C40F','#8E44AD','#1ABC9C']
+        color_index = 0
+
         for protein in st.session_state['seq_dict']:
             info = fetch_uniprot_info(protein)
             if info:
                 features = info.get('features', [])
+                for feat in features:
+                    ft_type = feat.get('type', 'Other')
+                    if ft_type not in motif_color_map:
+                        motif_color_map[ft_type] = color_palette[color_index % len(color_palette)]
+                        color_index += 1
+                st.subheader(protein)
                 st.json(features)
 
-# ---------------------------- Tab 8: 3D Viewer ----------------------------
+# ---------------------------- Tab 8: 3D AlphaFold Viewer with Motifs & Disorder ----------------------------
 with tabs[7]:
-    st.header("3D AlphaFold Viewer")
+    st.header("3D AlphaFold Viewer (with Motifs & Disorder)")
     if 'seq_dict' in st.session_state:
-        for protein in st.session_state['seq_dict']:
+        motif_color_map = st.session_state.get('motif_color_map', {})
+        for protein, seq in st.session_state['seq_dict'].items():
             pdb = fetch_alphafold_structure(protein)
             if pdb:
-                st.subheader(protein)
-                view = py3Dmol.view(width=800,height=400)
-                view.addModel(pdb,'pdb')
-                view.setStyle({'cartoon': {'color':'spectrum'}})
+                disorder_scores = compute_disorder(seq)
+                info = fetch_uniprot_info(protein)
+                features = info.get('features', []) if info else []
+
+                view = py3Dmol.view(width=800, height=400)
+                view.addModel(pdb, 'pdb')
+
+                # Default cartoon coloring by residue disorder
+                for i, s in enumerate(disorder_scores):
+                    color = f"#{int(255*(1-s)):02x}{int(255*(1-s)):02x}ff"
+                    view.setStyle({'resi': i+1}, {'cartoon': {'color': color}})
+
+                # Highlight motifs/domains
+                for feat in features:
+                    ft_type = feat.get('type', 'Other')
+                    start = feat.get('begin')
+                    end = feat.get('end')
+                    color = motif_color_map.get(ft_type, '#FF00FF')
+                    if start and end:
+                        view.addStyle({'resi': list(range(int(start), int(end)+1))}, {'cartoon': {'color': color}})
+
                 view.zoomTo()
-                # Render in Streamlit
                 html_view = view._make_html()
+                st.subheader(protein)
                 st.components.v1.html(html_view, height=400, width=800)
+            else:
+                st.warning(f"AlphaFold structure for {protein} not found.")
+
+
 # ---------------------------- Tab 9: Disorder & Stability ----------------------------
 with tabs[8]:
     st.header("Intrinsic Disorder & Stability")
@@ -215,21 +302,30 @@ with tabs[8]:
 
 # ---------------------------- Tab 10: DMNFZ Explorer ----------------------------
 with tabs[9]:
-    st.header("DMNFZ Explorer")
+    st.header("DMNFZ Explorer (Interactive)")
     if 'G' in st.session_state and 'disorder_dict' in st.session_state:
         dmnfz_dict = compute_DMNFZ(st.session_state['G'], st.session_state['disorder_dict'])
         threshold = st.slider("DMNFZ Threshold Filter", -2.0, 2.0, -2.0, 0.01)
-        filtered_dmnfz = {k:v for k,v in dmnfz_dict.items() if v >= threshold}
-        st.json(filtered_dmnfz)
+        filtered_nodes = [k for k,v in dmnfz_dict.items() if v >= threshold]
+        st.json({k:v for k,v in dmnfz_dict.items() if k in filtered_nodes})
 
 # ---------------------------- Tab 11: DFWMIN Explorer ----------------------------
 with tabs[10]:
-    st.header("DFWMIN Explorer")
-    if 'flux_dict' in st.session_state:
-        flux_dict_str = {f"{u}-{v}": val for (u,v), val in st.session_state['flux_dict'].items()}
-        threshold = st.slider("DFWMIN Threshold Filter", 0.0, max(flux_dict_str.values()), 0.0, 0.01)
-        filtered_flux = {k:v for k,v in flux_dict_str.items() if v >= threshold}
-        st.json(filtered_flux)
+    st.header("DFWMIN Explorer (Interactive Network)")
+    if 'G' in st.session_state and 'flux_dict' in st.session_state:
+        G = st.session_state['G']
+        pos = st.session_state['pos']
+        stkdd_dict = st.session_state['stkdd_dict']
+        flux_dict = st.session_state['flux_dict']
+
+        threshold = st.slider("DFWMIN Threshold Filter", 0.0, max(flux_dict.values(), default=1), 0.0, 0.01)
+        filtered_edges = [(u,v) for (u,v), val in flux_dict.items() if val >= threshold]
+        H = G.edge_subgraph(filtered_edges).copy()
+
+        fig = plot_network(H, pos, metric_dict={n: stkdd_dict.get(n,0) for n in H.nodes()},
+                           metric_name='STKDD', edge_filter=filtered_edges)
+        st.plotly_chart(fig, use_container_width=True)
+        st.write(f"Showing {len(H.nodes())} nodes and {len(H.edges())} edges above threshold")
 
 # ---------------------------- Tab 12: Centrality Measures ----------------------------
 with tabs[11]:
@@ -261,26 +357,47 @@ with tabs[12]:
 # ---------------------------- Tab 14: Network Robustness ----------------------------
 with tabs[13]:
     st.header("Network Robustness Simulation")
-    if 'G' in st.session_state:
+    if 'G' in st.session_state and 'pos' in st.session_state and 'stkdd_dict' in st.session_state:
         G = st.session_state['G']
         pos = st.session_state['pos']
-        degrees = dict(G.degree())
-        top_node = max(degrees, key=degrees.get)
-        G_temp = G.copy()
-        G_temp.remove_node(top_node)
-        node_threshold = st.slider("STKDD Threshold for Robustness", 0.0, 1.0, 0.0, 0.01)
-        fig = plot_network(G_temp, pos, st.session_state['stkdd_dict'], metric_name="STKDD", node_threshold=node_threshold)
-        st.plotly_chart(fig, use_container_width=True)
-        st.write(f"Removed top-degree node: {top_node}")
+        stkdd_dict = st.session_state['stkdd_dict']
+        flux_dict = st.session_state['flux_dict']
 
+        removal_mode = st.radio("Remove nodes by:", ['Below STKDD Threshold', 'Top Flux Nodes'])
+        if removal_mode=='Below STKDD Threshold':
+            threshold = st.slider("STKDD Threshold", 0.0, max(stkdd_dict.values()), 0.0, 0.01)
+            nodes_to_remove = [n for n,v in stkdd_dict.items() if v < threshold]
+        else:
+            num_nodes = st.slider("Number of top flux nodes to remove", 1, len(G.nodes()), 1)
+            flux_sum = {n: sum(flux_dict.get((n,v), flux_dict.get((v,n),0)) for v in G.neighbors(n)) for n in G.nodes()}
+            nodes_to_remove = sorted(flux_sum, key=flux_sum.get, reverse=True)[:num_nodes]
+
+        G_temp = G.copy()
+        G_temp.remove_nodes_from(nodes_to_remove)
+
+        fig = plot_network(G_temp, pos, metric_dict=stkdd_dict, metric_name='STKDD')
+        st.plotly_chart(fig, use_container_width=True)
+        st.write(f"Removed {len(nodes_to_remove)} nodes")
 # ---------------------------- Tab 15: Seq-Structure Mapping ----------------------------
 with tabs[14]:
-    st.header("Sequence-Structure Mapping")
+    st.header("Sequence-Structure Mapping (Motifs + Disorder)")
     if 'seq_dict' in st.session_state:
+        motif_color_map = st.session_state.get('motif_color_map', {})
         for protein, seq in st.session_state['seq_dict'].items():
             disorder_scores = compute_disorder(seq)
             st.subheader(f"{protein} Disorder vs Residue")
             st.line_chart(disorder_scores)
+
+            # Overlay motif/domain ranges
+            info = fetch_uniprot_info(protein)
+            features = info.get('features', []) if info else []
+            for feat in features:
+                start = int(feat.get('begin', 0))
+                end = int(feat.get('end', 0))
+                ft_type = feat.get('type','Other')
+                color = motif_color_map.get(ft_type, '#FF00FF')
+                if start and end:
+                    st.write(f"Motif {ft_type}: residues {start}-{end}")
 
 # ---------------------------- Tab 16: Downloads / Exports ----------------------------
 with tabs[15]:
