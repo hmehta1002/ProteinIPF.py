@@ -6,3 +6,4 @@ matplotlib
 requests
 networkx
 pyvis
+plotly>=5.20.0
