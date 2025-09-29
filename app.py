@@ -11,14 +11,16 @@ from networkx.algorithms import community
 st.set_page_config(page_title="IPF Disorder-Weighted PPI Explorer", layout="wide")
 
 # ---------------------------- Helper Functions ----------------------------
+@st.cache_data
 def fetch_uniprot_info(protein_id):
     url = f"https://rest.uniprot.org/uniprotkb/{protein_id}.json"
     resp = requests.get(url)
-    time.sleep(0.2)  # rate-limit safe
+    time.sleep(0.2)
     if resp.status_code==200:
         return resp.json()
     return None
 
+@st.cache_data
 def fetch_alphafold_structure(protein_id):
     url = f"https://alphafold.ebi.ac.uk/files/AF-{protein_id}-F1-model_v4.pdb"
     resp = requests.get(url)
@@ -27,7 +29,9 @@ def fetch_alphafold_structure(protein_id):
         return resp.text
     return None
 
+@st.cache_data
 def fetch_string_edges(proteins):
+    # Fully connected edges for demo
     edges = []
     for i,p1 in enumerate(proteins):
         for p2 in proteins[i+1:]:
@@ -64,6 +68,28 @@ def compute_DFWMIN(G, disorder_dict, stkdd_dict):
     for u,v in G.edges():
         flux_dict[(u,v)] = ((disorder_dict.get(u,0)+disorder_dict.get(v,0))/2) * ((stkdd_dict.get(u,0)+stkdd_dict.get(v,0))/2)
     return flux_dict
+
+def plot_network(G, pos, metric_dict, metric_name="STKDD", highlight_nodes=[]):
+    edge_x, edge_y = [], []
+    for u,v in G.edges():
+        x0,y0 = pos[u]; x1,y1 = pos[v]
+        edge_x += [x0,x1,None]; edge_y += [y0,y1,None]
+    edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1,color='#888'),
+                            hoverinfo='none', mode='lines')
+    node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
+    for n in G.nodes():
+        x,y = pos[n]; node_x.append(x); node_y.append(y)
+        node_size.append(20 + metric_dict.get(n,0)*30)
+        node_color.append(metric_dict.get(n,0))
+        node_text.append(f"{n}<br>{metric_name}: {metric_dict.get(n,0):.2f}")
+    marker_dict = dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title=metric_name))
+    if highlight_nodes:
+        marker_dict['line'] = dict(width=[3 if n in highlight_nodes else 0 for n in G.nodes()], color='red')
+    node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', text=list(G.nodes()),
+                            textposition="top center", hoverinfo='text', marker=marker_dict)
+    fig = go.Figure(data=[edge_trace, node_trace])
+    fig.update_layout(showlegend=False)
+    return fig
 
 # ---------------------------- Tabs ----------------------------
 tabs = st.tabs([
@@ -118,22 +144,7 @@ with tabs[2]:
         pos = nx.spring_layout(G, seed=42)
         st.session_state['pos'] = pos
 
-        edge_x, edge_y = [], []
-        for u,v in G.edges():
-            x0,y0 = pos[u]; x1,y1 = pos[v]
-            edge_x += [x0,x1,None]; edge_y += [y0,y1,None]
-        edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1,color='#888'),hoverinfo='none', mode='lines')
-
-        node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
-        for n in G.nodes():
-            x,y = pos[n]; node_x.append(x); node_y.append(y)
-            node_size.append(20 + stkdd_dict[n]*30)
-            node_color.append(stkdd_dict[n])
-            node_text.append(f"{n}<br>Disorder: {disorder_dict[n]:.2f}")
-        node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', text=list(G.nodes()), textposition="top center",
-                                hoverinfo='text', marker=dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title="STKDD")))
-        fig = go.Figure(data=[edge_trace, node_trace])
-        fig.update_layout(showlegend=False)
+        fig = plot_network(G, pos, stkdd_dict, metric_name="STKDD")
         st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------- Tab 4: Network Metrics ----------------------------
@@ -189,8 +200,8 @@ with tabs[7]:
                 view.addModel(pdb,'pdb')
                 view.setStyle({'cartoon': {'color':'spectrum'}})
                 view.zoomTo()
-                view.show()
-                st.write(view)
+                html_view = view._make_html()
+                st.components.v1.html(html_view, height=400, width=800)
 
 # ---------------------------- Tab 9: Disorder & Stability ----------------------------
 with tabs[8]:
@@ -251,23 +262,7 @@ with tabs[13]:
         top_node = max(degrees, key=degrees.get)
         G_temp = G.copy()
         G_temp.remove_node(top_node)
-
-        edge_x, edge_y = [], []
-        for u,v in G_temp.edges():
-            x0,y0 = pos[u]; x1,y1 = pos[v]
-            edge_x += [x0,x1,None]; edge_y += [y0,y1,None]
-        edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1,color='#f00'),hoverinfo='none', mode='lines')
-
-        node_x, node_y, node_size, node_color = [],[],[],[]
-        for n in G_temp.nodes():
-            x,y = pos[n]; node_x.append(x); node_y.append(y)
-            node_size.append(20 + st.session_state['stkdd_dict'].get(n,0)*30)
-            node_color.append(st.session_state['stkdd_dict'].get(n,0))
-
-        node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', text=list(G_temp.nodes()), textposition='top center',
-                                marker=dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title='STKDD')))
-        fig = go.Figure(data=[edge_trace, node_trace])
-        fig.update_layout(showlegend=False)
+        fig = plot_network(G_temp, pos, st.session_state['stkdd_dict'], metric_name="STKDD", highlight_nodes=[top_node])
         st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------- Tab 15: Seq-Structure Mapping ----------------------------
@@ -279,7 +274,7 @@ with tabs[14]:
             st.subheader(f"{protein} Disorder vs Residue")
             st.line_chart(disorder_scores)
 
-# ---------------------------- Downloads / Exports ----------------------------
+# ---------------------------- Tab 16: Downloads / Exports ----------------------------
 with tabs[15]:
     st.header("Download Metrics & Graph Data")
     if 'metrics' in st.session_state:
@@ -288,3 +283,7 @@ with tabs[15]:
     if 'df_edges' in st.session_state:
         csv_edges = st.session_state['df_edges'].to_csv(index=False).encode()
         st.download_button(label="Download Edge List CSV", data=csv_edges, file_name='edges.csv', mime='text/csv')
+    if 'G' in st.session_state:
+        nx.write_graphml(st.session_state['G'], "network.graphml")
+        with open("network.graphml", "r") as f:
+            st.download_button(label="Download GraphML", data=f, file_name="network.graphml")
