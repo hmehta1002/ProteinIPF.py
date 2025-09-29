@@ -1,26 +1,23 @@
 # app.py
 # Protein Network Explorer — Full + Novel Metrics + Mock Intrinsic Disorder + Heuristics + Insights
-# Requires: streamlit, pandas, numpy, matplotlib, requests
-# Optional: py3Dmol, pyvis, biopython (SeqIO)
+# Requires: streamlit, pandas, numpy, matplotlib, requests, plotly, networkx
+# Optional: py3Dmol, biopython (SeqIO)
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io, json, math, random, itertools, time
-from collections import deque, defaultdict
+import io, json, math, random, itertools
+from collections import deque
 import requests
-import streamlit.components.v1 as components
+import networkx as nx
+import plotly.graph_objects as go
 
 # Optional libraries
 try:
     import py3Dmol
 except Exception:
     py3Dmol = None
-try:
-    from pyvis.network import Network
-except Exception:
-    Network = None
 try:
     from Bio import SeqIO
 except Exception:
@@ -240,32 +237,37 @@ if uploaded_csv or ("use_sample" in st.session_state):
     tabs = st.tabs(["Network Graph","Metrics & Novelty","Sequences & Motifs","3D Viewer","Disorder Map","Insights & Downloads"])
     
     # -------------------------
-    # Network Graph
+    # Network Graph (Plotly + NetworkX)
     # -------------------------
     with tabs[0]:
         st.markdown("### Interactive Network Graph")
-        if Network:
-            net = Network(height="600px", width="100%", notebook=False, bgcolor="#1a1a1a", font_color="white")
-            # Community coloring via naive BFS groups
-            visited=set(); comm_id=0; comm_map={}
-            for node in nodes:
-                if node not in visited:
-                    queue=deque([node])
-                    while queue:
-                        n=queue.popleft(); visited.add(n); comm_map[n]=comm_id
-                        for nb in graph[n]:
-                            if nb not in visited: queue.append(nb)
-                    comm_id+=1
-            colors = ["#FF6347","#20B2AA","#FFD700","#FF69B4","#7B68EE","#00FA9A","#FF4500","#1E90FF"]
-            for n in nodes:
-                net.add_node(n, title=n, size=15+len(graph[n])*2, color=colors[comm_map[n]%len(colors)])
-            for a,b in itertools.combinations(nodes,2):
-                if b in graph[a]: net.add_edge(a,b)
-            net.show("graph.html")
-            HtmlFile=open("graph.html","r",encoding="utf-8").read()
-            components.html(HtmlFile,height=600)
-        else:
-            st.warning("pyvis not installed — cannot display interactive network.")
+        try:
+            G = nx.Graph()
+            for a,b in zip(df_edges[map_col_a], df_edges[map_col_b]):
+                G.add_edge(a,b)
+            pos = nx.spring_layout(G, seed=42)
+            edge_x=[]; edge_y=[]
+            for edge in G.edges():
+                x0,y0 = pos[edge[0]]
+                x1,y1 = pos[edge[1]]
+                edge_x += [x0,x1,None]
+                edge_y += [y0,y1,None]
+            edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1,color='#888'), hoverinfo='none', mode='lines')
+            node_x=[]; node_y=[]; text=[]
+            for node in G.nodes():
+                x,y = pos[node]
+                node_x.append(x); node_y.append(y); text.append(node)
+            node_trace = go.Scatter(
+                x=node_x, y=node_y, mode='markers+text', text=text,
+                textposition="top center", hoverinfo='text',
+                marker=dict(showscale=False, color='#20B2AA', size=12, line_width=2)
+            )
+            fig = go.Figure(data=[edge_trace,node_trace],
+                            layout=go.Layout(showlegend=False, hovermode='closest',
+                                             margin=dict(b=0,l=0,r=0,t=0)))
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error rendering graph: {e}")
 
     # -------------------------
     # Metrics & Novelty
@@ -304,19 +306,17 @@ if uploaded_csv or ("use_sample" in st.session_state):
             st.info("Upload a FASTA to see sequence metrics.")
     
     # -------------------------
-    # 3D Viewer
+    # 3D Viewer (safe py3Dmol)
     # -------------------------
     with tabs[3]:
         st.markdown("### AlphaFold / 3D Structure Viewer (mock)")
         if py3Dmol:
-            code = """
-            var viewer = $3Dmol.createViewer("container", {backgroundColor: "black"});
-            viewer.addModel("ATOM      1  N   MET A   1      11.104  13.207   2.568  1.00  0.00           N","pdb");
-            viewer.setStyle({}, {cartoon:{color:'spectrum'}});
-            viewer.zoomTo();
-            viewer.render();
-            """
-            components.html(f'<div id="container" style="height:500px;"></div><script>{code}</script>', height=500)
+            viewer = py3Dmol.view(width=600,height=500)
+            viewer.addModel("ATOM      1  N   MET A   1      11.104  13.207   2.568  1.00  0.00           N","pdb")
+            viewer.setStyle({"cartoon":{"color":"spectrum"}})
+            viewer.zoomTo()
+            viewer_html = viewer._make_html()
+            st.components.v1.html(viewer_html, height=500)
         else:
             st.warning("py3Dmol not installed — 3D viewer not available.")
     
@@ -342,7 +342,7 @@ if uploaded_csv or ("use_sample" in st.session_state):
     # -------------------------
     with tabs[5]:
         st.markdown("### Insights & Downloads")
-        if metrics_df is not None:
+        if 'metrics_df' in locals():
             st.markdown("**Top 5 proteins by Composite Centrality:**")
             st.table(metrics_df.head(5))
             st.download_button("Download metrics CSV", metrics_df.to_csv().encode("utf-8"), "metrics.csv")
