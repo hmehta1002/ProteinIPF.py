@@ -1,9 +1,8 @@
 streamlit
-py3Dmol
-biopython
 pandas
-matplotlib
-requests
 networkx
-pyvis
-plotly>=5.20.0
+matplotlib
+plotly
+biopython
+python-louvain
+
