@@ -31,7 +31,6 @@ def fetch_alphafold_structure(protein_id):
 
 @st.cache_data
 def fetch_string_edges(proteins):
-    # Fully connected edges for demo
     edges = []
     for i,p1 in enumerate(proteins):
         for p2 in proteins[i+1:]:
@@ -43,9 +42,6 @@ def compute_disorder(seq):
                 'I':4.5,'L':3.8,'K':-3.9,'M':1.9,'F':2.8,'P':-1.6,'S':-0.8,'T':-0.7,'W':-0.9,
                 'Y':-1.3,'V':4.2}
     return np.array([max(min((aa_hydro.get(aa,0)+4.5)/9,1),0) for aa in seq])
-
-def compute_vulnerable_regions(disorder_scores, snp_positions):
-    return [i for i, s in enumerate(disorder_scores) if s>0.6 and i in snp_positions]
 
 def compute_STKDD(disorder_avg, centrality, num_vulnerable):
     return disorder_avg * centrality * (1 + num_vulnerable)
@@ -69,15 +65,19 @@ def compute_DFWMIN(G, disorder_dict, stkdd_dict):
         flux_dict[(u,v)] = ((disorder_dict.get(u,0)+disorder_dict.get(v,0))/2) * ((stkdd_dict.get(u,0)+stkdd_dict.get(v,0))/2)
     return flux_dict
 
-def plot_network(G, pos, metric_dict, metric_name="STKDD", highlight_nodes=[]):
+def plot_network(G, pos, metric_dict, metric_name="STKDD", node_threshold=0, highlight_nodes=[], edge_filter=None):
     edge_x, edge_y = [], []
     for u,v in G.edges():
+        if edge_filter and (u,v) not in edge_filter and (v,u) not in edge_filter:
+            continue
         x0,y0 = pos[u]; x1,y1 = pos[v]
         edge_x += [x0,x1,None]; edge_y += [y0,y1,None]
     edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1,color='#888'),
                             hoverinfo='none', mode='lines')
     node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
     for n in G.nodes():
+        if metric_dict.get(n,0) < node_threshold:
+            continue
         x,y = pos[n]; node_x.append(x); node_y.append(y)
         node_size.append(20 + metric_dict.get(n,0)*30)
         node_color.append(metric_dict.get(n,0))
@@ -85,7 +85,7 @@ def plot_network(G, pos, metric_dict, metric_name="STKDD", highlight_nodes=[]):
     marker_dict = dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title=metric_name))
     if highlight_nodes:
         marker_dict['line'] = dict(width=[3 if n in highlight_nodes else 0 for n in G.nodes()], color='red')
-    node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', text=list(G.nodes()),
+    node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', text=node_text,
                             textposition="top center", hoverinfo='text', marker=marker_dict)
     fig = go.Figure(data=[edge_trace, node_trace])
     fig.update_layout(showlegend=False)
@@ -130,7 +130,7 @@ with tabs[1]:
 
 # ---------------------------- Tab 3: Network Map ----------------------------
 with tabs[2]:
-    st.header("Network Map")
+    st.header("Network Map with Filters")
     if 'G' in st.session_state:
         G = st.session_state['G']
         seq_dict = st.session_state['seq_dict']
@@ -144,7 +144,8 @@ with tabs[2]:
         pos = nx.spring_layout(G, seed=42)
         st.session_state['pos'] = pos
 
-        fig = plot_network(G, pos, stkdd_dict, metric_name="STKDD")
+        node_threshold = st.slider("STKDD Threshold Filter", 0.0, 1.0, 0.0, 0.01)
+        fig = plot_network(G, pos, stkdd_dict, metric_name="STKDD", node_threshold=node_threshold)
         st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------- Tab 4: Network Metrics ----------------------------
@@ -200,9 +201,9 @@ with tabs[7]:
                 view.addModel(pdb,'pdb')
                 view.setStyle({'cartoon': {'color':'spectrum'}})
                 view.zoomTo()
+                # Render in Streamlit
                 html_view = view._make_html()
                 st.components.v1.html(html_view, height=400, width=800)
-
 # ---------------------------- Tab 9: Disorder & Stability ----------------------------
 with tabs[8]:
     st.header("Intrinsic Disorder & Stability")
@@ -217,13 +218,18 @@ with tabs[9]:
     st.header("DMNFZ Explorer")
     if 'G' in st.session_state and 'disorder_dict' in st.session_state:
         dmnfz_dict = compute_DMNFZ(st.session_state['G'], st.session_state['disorder_dict'])
-        st.json(dmnfz_dict)
+        threshold = st.slider("DMNFZ Threshold Filter", -2.0, 2.0, -2.0, 0.01)
+        filtered_dmnfz = {k:v for k,v in dmnfz_dict.items() if v >= threshold}
+        st.json(filtered_dmnfz)
 
 # ---------------------------- Tab 11: DFWMIN Explorer ----------------------------
 with tabs[10]:
     st.header("DFWMIN Explorer")
     if 'flux_dict' in st.session_state:
-        st.json(st.session_state['flux_dict'])
+        flux_dict_str = {f"{u}-{v}": val for (u,v), val in st.session_state['flux_dict'].items()}
+        threshold = st.slider("DFWMIN Threshold Filter", 0.0, max(flux_dict_str.values()), 0.0, 0.01)
+        filtered_flux = {k:v for k,v in flux_dict_str.items() if v >= threshold}
+        st.json(filtered_flux)
 
 # ---------------------------- Tab 12: Centrality Measures ----------------------------
 with tabs[11]:
@@ -262,8 +268,10 @@ with tabs[13]:
         top_node = max(degrees, key=degrees.get)
         G_temp = G.copy()
         G_temp.remove_node(top_node)
-        fig = plot_network(G_temp, pos, st.session_state['stkdd_dict'], metric_name="STKDD", highlight_nodes=[top_node])
+        node_threshold = st.slider("STKDD Threshold for Robustness", 0.0, 1.0, 0.0, 0.01)
+        fig = plot_network(G_temp, pos, st.session_state['stkdd_dict'], metric_name="STKDD", node_threshold=node_threshold)
         st.plotly_chart(fig, use_container_width=True)
+        st.write(f"Removed top-degree node: {top_node}")
 
 # ---------------------------- Tab 15: Seq-Structure Mapping ----------------------------
 with tabs[14]:
@@ -283,7 +291,3 @@ with tabs[15]:
     if 'df_edges' in st.session_state:
         csv_edges = st.session_state['df_edges'].to_csv(index=False).encode()
         st.download_button(label="Download Edge List CSV", data=csv_edges, file_name='edges.csv', mime='text/csv')
-    if 'G' in st.session_state:
-        nx.write_graphml(st.session_state['G'], "network.graphml")
-        with open("network.graphml", "r") as f:
-            st.download_button(label="Download GraphML", data=f, file_name="network.graphml")
