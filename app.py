@@ -71,6 +71,24 @@ def compute_DFWMIN(G, disorder_dict, stkdd_dict):
         flux_dict[(u,v)] = ((disorder_dict.get(u,0) + disorder_dict.get(v,0))/2) * ((stkdd_dict.get(u,0) + stkdd_dict.get(v,0))/2)
     return flux_dict
 
+def compute_PVI(stkdd_dict, flux_dict, G):
+    pvi_dict = {}
+    for n in G.nodes():
+        flux_sum = sum(flux_dict.get((n,v), flux_dict.get((v,n),0)) for v in G.neighbors(n))
+        pvi_dict[n] = stkdd_dict.get(n,0) * (1 + flux_sum)
+    return pvi_dict
+
+@st.cache_data
+def load_snp_data(file):
+    df = pd.read_csv(file)
+    snp_dict = {}
+    for _, row in df.iterrows():
+        prot = row['Protein']
+        if prot not in snp_dict:
+            snp_dict[prot] = []
+        snp_dict[prot].append(f"{row['SNP']} ({row['Effect']})")
+    return snp_dict
+
 def plot_network(G, pos, metric_dict, metric_name="STKDD", node_threshold=0, highlight_nodes=[], edge_filter=None):
     edge_x, edge_y = [], []
     for u,v in G.edges():
@@ -110,6 +128,7 @@ tabs = st.tabs([
 with tabs[0]:
     st.header("Upload Protein FASTA")
     uploaded_fasta = st.file_uploader("Upload FASTA sequences", type=["fasta"])
+    snp_file = st.file_uploader("Upload SNP CSV (optional)", type=["csv"])
     if uploaded_fasta:
         seqs = uploaded_fasta.read().decode().split('>')
         seq_dict = {}
@@ -133,27 +152,24 @@ with tabs[0]:
         degree_c = dict(G.degree())
         st.session_state['stkdd_dict'] = {p: compute_STKDD(st.session_state['disorder_dict'][p], degree_c[p], 1) for p in G.nodes()}
         st.session_state['flux_dict'] = compute_DFWMIN(G, st.session_state['disorder_dict'], st.session_state['stkdd_dict'])
+        st.session_state['pvi_dict'] = compute_PVI(st.session_state['stkdd_dict'], st.session_state['flux_dict'], G)
         st.session_state['pos'] = nx.spring_layout(G, seed=42)
+        if snp_file:
+            st.session_state['snp_dict'] = load_snp_data(snp_file)
         st.success("Network & metrics initialized!")
+
 # ---------------------------- Tab 2: STRING Network ----------------------------
 with tabs[1]:
     st.header("Build PPI Network from STRING")
     if 'seq_dict' in st.session_state:
-        proteins = list(st.session_state['seq_dict'].keys())
-        
-        # ---- Fetch edges from STRING API ----
-        df_edges = fetch_string_edges(proteins)  # You can replace with real STRING API calls
-        
-        # Add placeholder "confidence score" (1-100) for demonstration
+        df_edges = fetch_string_edges(list(st.session_state['seq_dict'].keys()))
         df_edges['Confidence'] = np.random.randint(50,101,size=len(df_edges))
-        
-        st.session_state['df_edges'] = df_edges
         G = nx.from_pandas_edgelist(df_edges, 'Protein1', 'Protein2', edge_attr='Confidence')
         st.session_state['G'] = G
+        st.session_state['df_edges'] = df_edges
         st.success("PPI network built with confidence scores")
         st.dataframe(df_edges)
 
-# ---------------------------- Tab 3: Network Map ----------------------------
 # ---------------------------- Tab 3: Network Map ----------------------------
 with tabs[2]:
     st.header("Interactive Network Map (with DFWMIN Edge Coloring)")
@@ -163,21 +179,16 @@ with tabs[2]:
         stkdd_dict = st.session_state['stkdd_dict']
         flux_dict = st.session_state['flux_dict']
 
-        # Node filter
         stkdd_thresh = st.slider("Filter nodes by STKDD", 0.0, max(stkdd_dict.values()), 0.0, 0.01)
         filtered_nodes = [n for n,v in stkdd_dict.items() if v >= stkdd_thresh]
         H = G.subgraph(filtered_nodes)
 
-        # Normalize DFWMIN values to [0,1] for colorscale
-        edge_vals = [flux_dict.get((u,v), flux_dict.get((v,u), 0)) for u,v in H.edges()]
+        edge_vals = [flux_dict.get((u,v), flux_dict.get((v,u),0)) for u,v in H.edges()]
         min_val, max_val = min(edge_vals or [0]), max(edge_vals or [1])
-        norm = lambda x: (x - min_val) / (max_val - min_val + 1e-9)  # avoid division by zero
-
-        # Convert normalized values to color using Viridis
+        norm = lambda x: (x - min_val) / (max_val - min_val + 1e-9)
         import plotly.express as px
         edge_colors = [px.colors.sequential.Viridis[int(norm(val)*(len(px.colors.sequential.Viridis)-1))] for val in edge_vals]
 
-        # Edge trace
         edge_x, edge_y, edge_text = [], [], []
         for i, (u,v) in enumerate(H.edges()):
             x0, y0 = pos[u]; x1, y1 = pos[v]
@@ -186,13 +197,12 @@ with tabs[2]:
 
         edge_trace = go.Scatter(
             x=edge_x, y=edge_y,
-            line=dict(width=2, color='gray'),  # line color fixed; individual edge colors applied via multiple traces
+            line=dict(width=2, color='gray'),
             hoverinfo='text',
             text=edge_text,
             mode='lines'
         )
 
-        # Node trace
         node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
         for n in H.nodes():
             x,y = pos[n]; node_x.append(x); node_y.append(y)
@@ -205,9 +215,7 @@ with tabs[2]:
             hoverinfo='text', marker=dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title='STKDD'))
         )
 
-        # Build figure with individual edges colored
         fig = go.Figure()
-        # add each edge as a separate trace to allow color mapping
         for i, (u,v) in enumerate(H.edges()):
             x0, y0 = pos[u]; x1, y1 = pos[v]
             fig.add_trace(go.Scatter(
@@ -231,20 +239,37 @@ with tabs[3]:
             'Degree': [G.degree(n) for n in G.nodes()],
             'Betweenness': [nx.betweenness_centrality(G)[n] for n in G.nodes()],
             'Closeness': [nx.closeness_centrality(G)[n] for n in G.nodes()],
-            'Eigenvector': [nx.eigenvector_centrality(G, max_iter=500)[n] for n in G.nodes()]
+            'Eigenvector': [nx.eigenvector_centrality(G, max_iter=500)[n] for n in G.nodes()],
+            'STKDD': [st.session_state['stkdd_dict'][n] for n in G.nodes()],
+            'PVI': [st.session_state['pvi_dict'][n] for n in G.nodes()]
         })
         st.session_state['metrics'] = metrics
         st.dataframe(metrics)
 
 # ---------------------------- Tab 5: Protein Details ----------------------------
 with tabs[4]:
-    st.header("Protein Details from UniProt")
+    st.header("Protein Details (UniProt + PVI + SNPs)")
     if 'seq_dict' in st.session_state:
+        pvi_dict = st.session_state.get('pvi_dict', {})
+        snp_dict = st.session_state.get('snp_dict', {})
+
         for protein in st.session_state['seq_dict'].keys():
+            st.subheader(protein)
             info = fetch_uniprot_info(protein)
             if info:
-                st.subheader(protein)
                 st.json(info)
+
+            if protein in pvi_dict:
+                st.write(f"**PVI:** {pvi_dict[protein]:.2f}")
+
+            if protein in snp_dict:
+                st.write("**SNPs:**")
+                for s in snp_dict[protein]:
+                    st.write(f"- {s}")
+
+# ---------------------------- Remaining tabs unchanged ----------------------------
+# Tabs 6-16 remain same as your original script
+# Include sequences, motifs, 3D viewer, disorder, DMNFZ, DFWMIN, centrality, community detection, robustness, seq-structure mapping, downloads
 
 # ---------------------------- Tab 6: Sequences / FASTA ----------------------------
 with tabs[5]:
