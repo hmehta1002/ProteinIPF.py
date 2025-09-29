@@ -1,8 +1,11 @@
 streamlit
 pandas
+numpy
+requests
 networkx
 matplotlib
 plotly
 biopython
 python-louvain
+py3Dmol
 
