@@ -154,6 +154,7 @@ with tabs[1]:
         st.dataframe(df_edges)
 
 # ---------------------------- Tab 3: Network Map ----------------------------
+# ---------------------------- Tab 3: Network Map ----------------------------
 with tabs[2]:
     st.header("Interactive Network Map (with DFWMIN Edge Coloring)")
     if 'G' in st.session_state and 'seq_dict' in st.session_state:
@@ -167,18 +168,25 @@ with tabs[2]:
         filtered_nodes = [n for n,v in stkdd_dict.items() if v >= stkdd_thresh]
         H = G.subgraph(filtered_nodes)
 
-        # Edge trace with DFWMIN color
-        edge_x, edge_y, edge_color, edge_text = [], [], [], []
-        for u,v in H.edges():
-            x0,y0 = pos[u]; x1,y1 = pos[v]
-            edge_x += [x0,x1,None]; edge_y += [y0,y1,None]
-            val = flux_dict.get((u,v), flux_dict.get((v,u), 0))
-            edge_color.append(val)
-            edge_text.append(f"{u}-{v}<br>DFWMIN: {val:.2f}")
+        # Normalize DFWMIN values to [0,1] for colorscale
+        edge_vals = [flux_dict.get((u,v), flux_dict.get((v,u), 0)) for u,v in H.edges()]
+        min_val, max_val = min(edge_vals or [0]), max(edge_vals or [1])
+        norm = lambda x: (x - min_val) / (max_val - min_val + 1e-9)  # avoid division by zero
+
+        # Convert normalized values to color using Viridis
+        import plotly.express as px
+        edge_colors = [px.colors.sequential.Viridis[int(norm(val)*(len(px.colors.sequential.Viridis)-1))] for val in edge_vals]
+
+        # Edge trace
+        edge_x, edge_y, edge_text = [], [], []
+        for i, (u,v) in enumerate(H.edges()):
+            x0, y0 = pos[u]; x1, y1 = pos[v]
+            edge_x += [x0, x1, None]; edge_y += [y0, y1, None]
+            edge_text.append(f"{u}-{v}<br>DFWMIN: {edge_vals[i]:.2f}")
 
         edge_trace = go.Scatter(
             x=edge_x, y=edge_y,
-            line=dict(width=2, color=edge_color, colorscale='Viridis', showscale=True, colorbar=dict(title='DFWMIN')),
+            line=dict(width=2, color='gray'),  # line color fixed; individual edge colors applied via multiple traces
             hoverinfo='text',
             text=edge_text,
             mode='lines'
@@ -197,9 +205,22 @@ with tabs[2]:
             hoverinfo='text', marker=dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title='STKDD'))
         )
 
-        fig = go.Figure(data=[edge_trace, node_trace])
+        # Build figure with individual edges colored
+        fig = go.Figure()
+        # add each edge as a separate trace to allow color mapping
+        for i, (u,v) in enumerate(H.edges()):
+            x0, y0 = pos[u]; x1, y1 = pos[v]
+            fig.add_trace(go.Scatter(
+                x=[x0, x1], y=[y0, y1],
+                line=dict(width=2, color=edge_colors[i]),
+                hoverinfo='text',
+                text=[f"{u}-{v}<br>DFWMIN: {edge_vals[i]:.2f}"],
+                mode='lines'
+            ))
+        fig.add_trace(node_trace)
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
+
 # ---------------------------- Tab 4: Network Metrics ----------------------------
 with tabs[3]:
     st.header("Network Metrics")
@@ -322,8 +343,40 @@ with tabs[10]:
         filtered_edges = [(u,v) for (u,v), val in flux_dict.items() if val >= threshold]
         H = G.edge_subgraph(filtered_edges).copy()
 
-        fig = plot_network(H, pos, metric_dict={n: stkdd_dict.get(n,0) for n in H.nodes()},
-                           metric_name='STKDD', edge_filter=filtered_edges)
+        # Normalize DFWMIN for colors
+        edge_vals = [flux_dict.get((u,v), flux_dict.get((v,u),0)) for u,v in H.edges()]
+        min_val, max_val = min(edge_vals or [0]), max(edge_vals or [1])
+        norm = lambda x: (x - min_val) / (max_val - min_val + 1e-9)
+        import plotly.express as px
+        edge_colors = [px.colors.sequential.Viridis[int(norm(val)*(len(px.colors.sequential.Viridis)-1))] for val in edge_vals]
+
+        # Node trace
+        node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
+        for n in H.nodes():
+            x,y = pos[n]
+            node_x.append(x); node_y.append(y)
+            node_size.append(20 + stkdd_dict.get(n,0)*30)
+            node_color.append(stkdd_dict.get(n,0))
+            node_text.append(f"{n}<br>STKDD: {stkdd_dict.get(n,0):.2f}")
+
+        node_trace = go.Scatter(
+            x=node_x, y=node_y, mode='markers+text', text=node_text, textposition="top center",
+            hoverinfo='text', marker=dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title='STKDD'))
+        )
+
+        # Build figure with colored edges
+        fig = go.Figure()
+        for i, (u,v) in enumerate(H.edges()):
+            x0, y0 = pos[u]; x1, y1 = pos[v]
+            fig.add_trace(go.Scatter(
+                x=[x0,x1], y=[y0,y1],
+                line=dict(width=2, color=edge_colors[i]),
+                hoverinfo='text',
+                text=[f"{u}-{v}<br>DFWMIN: {edge_vals[i]:.2f}"],
+                mode='lines'
+            ))
+        fig.add_trace(node_trace)
+        fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
         st.write(f"Showing {len(H.nodes())} nodes and {len(H.edges())} edges above threshold")
 
