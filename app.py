@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import networkx as nx
 import plotly.graph_objects as go
+import plotly.express as px
 import py3Dmol
 import requests
 import time
@@ -79,14 +80,27 @@ def compute_PVI(stkdd_dict, flux_dict, G):
     return pvi_dict
 
 @st.cache_data
-def load_snp_data(file):
+def load_snp_df(file):
+    """Return pandas DataFrame from uploaded SNP CSV. Expect at least 'Protein' and 'SNP'/'Effect' columns."""
     df = pd.read_csv(file)
+    return df
+
+def build_snp_dict_from_df(df):
+    """Create mapping protein -> list of 'SNP (Effect)' strings."""
     snp_dict = {}
+    if df is None:
+        return snp_dict
     for _, row in df.iterrows():
-        prot = row['Protein']
+        prot = row.get('Protein')
+        if pd.isna(prot):
+            continue
+        prot = str(prot)
+        snp_id = row.get('SNP', row.get('SNP_ID', 'unknown'))
+        effect = row.get('Effect', '')
+        label = f"{snp_id} ({effect})" if not pd.isna(effect) and str(effect)!='' else str(snp_id)
         if prot not in snp_dict:
             snp_dict[prot] = []
-        snp_dict[prot].append(f"{row['SNP']} ({row['Effect']})")
+        snp_dict[prot].append(label)
     return snp_dict
 
 def plot_network(G, pos, metric_dict, metric_name="STKDD", node_threshold=0, highlight_nodes=[], edge_filter=None):
@@ -108,7 +122,9 @@ def plot_network(G, pos, metric_dict, metric_name="STKDD", node_threshold=0, hig
         node_text.append(f"{n}<br>{metric_name}: {metric_dict.get(n,0):.2f}")
     marker_dict = dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title=metric_name))
     if highlight_nodes:
-        marker_dict['line'] = dict(width=[3 if n in highlight_nodes else 0 for n in G.nodes()], color='red')
+        # build a line width list aligned to the nodes that are in the node list used for plotting
+        node_list_for_width = [n for n in G.nodes() if metric_dict.get(n,0) >= node_threshold]
+        marker_dict['line'] = dict(width=[3 if n in highlight_nodes else 0 for n in node_list_for_width], color='red')
     node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', text=node_text,
                             textposition="top center", hoverinfo='text', marker=marker_dict)
     fig = go.Figure(data=[edge_trace, node_trace])
@@ -121,14 +137,14 @@ tabs = st.tabs([
     "Protein Details", "Sequences / FASTA", "Motifs / Domains", "3D Viewer",
     "Disorder & Stability", "DMNFZ Explorer", "DFWMIN Explorer",
     "Centrality Measures", "Community Detection", "Network Robustness",
-    "Seq-Structure Mapping", "Downloads / Exports"
+    "Seq-Structure Mapping", "SNP Mapping", "SNP Effects Explorer", "Downloads / Exports"
 ])
 
 # ---------------------------- Tab 1: Upload ----------------------------
 with tabs[0]:
     st.header("Upload Protein FASTA")
     uploaded_fasta = st.file_uploader("Upload FASTA sequences", type=["fasta"])
-    snp_file = st.file_uploader("Upload SNP CSV (optional)", type=["csv"])
+    snp_file_upload = st.file_uploader("Upload SNP CSV (optional) — can also upload in SNP Mapping tab", type=["csv"])
     if uploaded_fasta:
         seqs = uploaded_fasta.read().decode().split('>')
         seq_dict = {}
@@ -154,8 +170,11 @@ with tabs[0]:
         st.session_state['flux_dict'] = compute_DFWMIN(G, st.session_state['disorder_dict'], st.session_state['stkdd_dict'])
         st.session_state['pvi_dict'] = compute_PVI(st.session_state['stkdd_dict'], st.session_state['flux_dict'], G)
         st.session_state['pos'] = nx.spring_layout(G, seed=42)
-        if snp_file:
-            st.session_state['snp_dict'] = load_snp_data(snp_file)
+        # if SNP uploaded here, load it
+        if snp_file_upload:
+            snp_df = load_snp_df(snp_file_upload)
+            st.session_state['snp_df'] = snp_df
+            st.session_state['snp_dict'] = build_snp_dict_from_df(snp_df)
         st.success("Network & metrics initialized!")
 
 # ---------------------------- Tab 2: STRING Network ----------------------------
@@ -169,6 +188,8 @@ with tabs[1]:
         st.session_state['df_edges'] = df_edges
         st.success("PPI network built with confidence scores")
         st.dataframe(df_edges)
+    else:
+        st.info("Upload FASTA sequences first in Upload / Files tab.")
 
 # ---------------------------- Tab 3: Network Map ----------------------------
 with tabs[2]:
@@ -186,22 +207,7 @@ with tabs[2]:
         edge_vals = [flux_dict.get((u,v), flux_dict.get((v,u),0)) for u,v in H.edges()]
         min_val, max_val = min(edge_vals or [0]), max(edge_vals or [1])
         norm = lambda x: (x - min_val) / (max_val - min_val + 1e-9)
-        import plotly.express as px
         edge_colors = [px.colors.sequential.Viridis[int(norm(val)*(len(px.colors.sequential.Viridis)-1))] for val in edge_vals]
-
-        edge_x, edge_y, edge_text = [], [], []
-        for i, (u,v) in enumerate(H.edges()):
-            x0, y0 = pos[u]; x1, y1 = pos[v]
-            edge_x += [x0, x1, None]; edge_y += [y0, y1, None]
-            edge_text.append(f"{u}-{v}<br>DFWMIN: {edge_vals[i]:.2f}")
-
-        edge_trace = go.Scatter(
-            x=edge_x, y=edge_y,
-            line=dict(width=2, color='gray'),
-            hoverinfo='text',
-            text=edge_text,
-            mode='lines'
-        )
 
         node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
         for n in H.nodes():
@@ -228,23 +234,31 @@ with tabs[2]:
         fig.add_trace(node_trace)
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Build or load a network first (Upload FASTA or STRING Network tab).")
 
 # ---------------------------- Tab 4: Network Metrics ----------------------------
 with tabs[3]:
     st.header("Network Metrics")
     if 'G' in st.session_state:
         G = st.session_state['G']
+        # compute centrality measures once
+        betweenness = nx.betweenness_centrality(G)
+        closeness = nx.closeness_centrality(G)
+        eigen = nx.eigenvector_centrality(G, max_iter=500)
         metrics = pd.DataFrame({
             'Protein': list(G.nodes()),
             'Degree': [G.degree(n) for n in G.nodes()],
-            'Betweenness': [nx.betweenness_centrality(G)[n] for n in G.nodes()],
-            'Closeness': [nx.closeness_centrality(G)[n] for n in G.nodes()],
-            'Eigenvector': [nx.eigenvector_centrality(G, max_iter=500)[n] for n in G.nodes()],
+            'Betweenness': [betweenness[n] for n in G.nodes()],
+            'Closeness': [closeness[n] for n in G.nodes()],
+            'Eigenvector': [eigen[n] for n in G.nodes()],
             'STKDD': [st.session_state['stkdd_dict'][n] for n in G.nodes()],
             'PVI': [st.session_state['pvi_dict'][n] for n in G.nodes()]
         })
         st.session_state['metrics'] = metrics
         st.dataframe(metrics)
+    else:
+        st.info("Build or load a network first.")
 
 # ---------------------------- Tab 5: Protein Details ----------------------------
 with tabs[4]:
@@ -252,32 +266,28 @@ with tabs[4]:
     if 'seq_dict' in st.session_state:
         pvi_dict = st.session_state.get('pvi_dict', {})
         snp_dict = st.session_state.get('snp_dict', {})
-
         for protein in st.session_state['seq_dict'].keys():
             st.subheader(protein)
             info = fetch_uniprot_info(protein)
             if info:
                 st.json(info)
-
             if protein in pvi_dict:
                 st.write(f"**PVI:** {pvi_dict[protein]:.2f}")
-
             if protein in snp_dict:
                 st.write("**SNPs:**")
                 for s in snp_dict[protein]:
                     st.write(f"- {s}")
-
-# ---------------------------- Remaining tabs unchanged ----------------------------
-# Tabs 6-16 remain same as your original script
-# Include sequences, motifs, 3D viewer, disorder, DMNFZ, DFWMIN, centrality, community detection, robustness, seq-structure mapping, downloads
+    else:
+        st.info("Upload FASTA sequences to view protein details.")
 
 # ---------------------------- Tab 6: Sequences / FASTA ----------------------------
 with tabs[5]:
     st.header("FASTA Sequences")
     if 'seq_dict' in st.session_state:
         st.text(st.session_state['seq_dict'])
+    else:
+        st.info("Upload FASTA in Upload / Files tab.")
 
-# ---------------------------- Tab 7: Motifs / Domains ----------------------------
 # ---------------------------- Tab 7: Motifs / Domains ----------------------------
 with tabs[6]:
     st.header("Motifs & Domains")
@@ -287,7 +297,6 @@ with tabs[6]:
         motif_color_map = st.session_state['motif_color_map']
         color_palette = ['#FF5733','#33FF57','#3357FF','#F1C40F','#8E44AD','#1ABC9C']
         color_index = 0
-
         for protein in st.session_state['seq_dict']:
             info = fetch_uniprot_info(protein)
             if info:
@@ -299,6 +308,8 @@ with tabs[6]:
                         color_index += 1
                 st.subheader(protein)
                 st.json(features)
+    else:
+        st.info("Upload FASTA to fetch motifs/domains.")
 
 # ---------------------------- Tab 8: 3D AlphaFold Viewer with Motifs & Disorder ----------------------------
 with tabs[7]:
@@ -311,15 +322,12 @@ with tabs[7]:
                 disorder_scores = compute_disorder(seq)
                 info = fetch_uniprot_info(protein)
                 features = info.get('features', []) if info else []
-
                 view = py3Dmol.view(width=800, height=400)
                 view.addModel(pdb, 'pdb')
-
                 # Default cartoon coloring by residue disorder
                 for i, s in enumerate(disorder_scores):
                     color = f"#{int(255*(1-s)):02x}{int(255*(1-s)):02x}ff"
                     view.setStyle({'resi': i+1}, {'cartoon': {'color': color}})
-
                 # Highlight motifs/domains
                 for feat in features:
                     ft_type = feat.get('type', 'Other')
@@ -328,14 +336,14 @@ with tabs[7]:
                     color = motif_color_map.get(ft_type, '#FF00FF')
                     if start and end:
                         view.addStyle({'resi': list(range(int(start), int(end)+1))}, {'cartoon': {'color': color}})
-
                 view.zoomTo()
                 html_view = view._make_html()
                 st.subheader(protein)
                 st.components.v1.html(html_view, height=400, width=800)
             else:
                 st.warning(f"AlphaFold structure for {protein} not found.")
-
+    else:
+        st.info("Upload FASTA to visualize structures.")
 
 # ---------------------------- Tab 9: Disorder & Stability ----------------------------
 with tabs[8]:
@@ -345,6 +353,8 @@ with tabs[8]:
             disorder_scores = compute_disorder(seq)
             st.subheader(protein)
             st.line_chart(disorder_scores)
+    else:
+        st.info("Upload FASTA to compute disorder.")
 
 # ---------------------------- Tab 10: DMNFZ Explorer ----------------------------
 with tabs[9]:
@@ -354,6 +364,8 @@ with tabs[9]:
         threshold = st.slider("DMNFZ Threshold Filter", -2.0, 2.0, -2.0, 0.01)
         filtered_nodes = [k for k,v in dmnfz_dict.items() if v >= threshold]
         st.json({k:v for k,v in dmnfz_dict.items() if k in filtered_nodes})
+    else:
+        st.info("Build network first.")
 
 # ---------------------------- Tab 11: DFWMIN Explorer ----------------------------
 with tabs[10]:
@@ -363,19 +375,13 @@ with tabs[10]:
         pos = st.session_state['pos']
         stkdd_dict = st.session_state['stkdd_dict']
         flux_dict = st.session_state['flux_dict']
-
         threshold = st.slider("DFWMIN Threshold Filter", 0.0, max(flux_dict.values(), default=1), 0.0, 0.01)
         filtered_edges = [(u,v) for (u,v), val in flux_dict.items() if val >= threshold]
         H = G.edge_subgraph(filtered_edges).copy()
-
-        # Normalize DFWMIN for colors
         edge_vals = [flux_dict.get((u,v), flux_dict.get((v,u),0)) for u,v in H.edges()]
         min_val, max_val = min(edge_vals or [0]), max(edge_vals or [1])
         norm = lambda x: (x - min_val) / (max_val - min_val + 1e-9)
-        import plotly.express as px
         edge_colors = [px.colors.sequential.Viridis[int(norm(val)*(len(px.colors.sequential.Viridis)-1))] for val in edge_vals]
-
-        # Node trace
         node_x, node_y, node_size, node_color, node_text = [],[],[],[],[]
         for n in H.nodes():
             x,y = pos[n]
@@ -383,13 +389,10 @@ with tabs[10]:
             node_size.append(20 + stkdd_dict.get(n,0)*30)
             node_color.append(stkdd_dict.get(n,0))
             node_text.append(f"{n}<br>STKDD: {stkdd_dict.get(n,0):.2f}")
-
         node_trace = go.Scatter(
             x=node_x, y=node_y, mode='markers+text', text=node_text, textposition="top center",
             hoverinfo='text', marker=dict(color=node_color, colorscale='Viridis', size=node_size, colorbar=dict(title='STKDD'))
         )
-
-        # Build figure with colored edges
         fig = go.Figure()
         for i, (u,v) in enumerate(H.edges()):
             x0, y0 = pos[u]; x1, y1 = pos[v]
@@ -404,6 +407,8 @@ with tabs[10]:
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
         st.write(f"Showing {len(H.nodes())} nodes and {len(H.edges())} edges above threshold")
+    else:
+        st.info("Build network first.")
 
 # ---------------------------- Tab 12: Centrality Measures ----------------------------
 with tabs[11]:
@@ -422,6 +427,8 @@ with tabs[11]:
             'Eigenvector': [eigen_c[n] for n in G.nodes()]
         })
         st.dataframe(centrality_df)
+    else:
+        st.info("Build network first.")
 
 # ---------------------------- Tab 13: Community Detection ----------------------------
 with tabs[12]:
@@ -431,6 +438,8 @@ with tabs[12]:
         communities_gen = community.label_propagation_communities(G)
         comm_dict = {f'Community {i+1}': list(c) for i,c in enumerate(communities_gen)}
         st.json(comm_dict)
+    else:
+        st.info("Build network first.")
 
 # ---------------------------- Tab 14: Network Robustness ----------------------------
 with tabs[13]:
@@ -440,7 +449,6 @@ with tabs[13]:
         pos = st.session_state['pos']
         stkdd_dict = st.session_state['stkdd_dict']
         flux_dict = st.session_state['flux_dict']
-
         removal_mode = st.radio("Remove nodes by:", ['Below STKDD Threshold', 'Top Flux Nodes'])
         if removal_mode=='Below STKDD Threshold':
             threshold = st.slider("STKDD Threshold", 0.0, max(stkdd_dict.values()), 0.0, 0.01)
@@ -449,13 +457,14 @@ with tabs[13]:
             num_nodes = st.slider("Number of top flux nodes to remove", 1, len(G.nodes()), 1)
             flux_sum = {n: sum(flux_dict.get((n,v), flux_dict.get((v,n),0)) for v in G.neighbors(n)) for n in G.nodes()}
             nodes_to_remove = sorted(flux_sum, key=flux_sum.get, reverse=True)[:num_nodes]
-
         G_temp = G.copy()
         G_temp.remove_nodes_from(nodes_to_remove)
-
         fig = plot_network(G_temp, pos, metric_dict=stkdd_dict, metric_name='STKDD')
         st.plotly_chart(fig, use_container_width=True)
         st.write(f"Removed {len(nodes_to_remove)} nodes")
+    else:
+        st.info("Build network first.")
+
 # ---------------------------- Tab 15: Seq-Structure Mapping ----------------------------
 with tabs[14]:
     st.header("Sequence-Structure Mapping (Motifs + Disorder)")
@@ -465,8 +474,6 @@ with tabs[14]:
             disorder_scores = compute_disorder(seq)
             st.subheader(f"{protein} Disorder vs Residue")
             st.line_chart(disorder_scores)
-
-            # Overlay motif/domain ranges
             info = fetch_uniprot_info(protein)
             features = info.get('features', []) if info else []
             for feat in features:
@@ -476,9 +483,109 @@ with tabs[14]:
                 color = motif_color_map.get(ft_type, '#FF00FF')
                 if start and end:
                     st.write(f"Motif {ft_type}: residues {start}-{end}")
+    else:
+        st.info("Upload FASTA first.")
 
-# ---------------------------- Tab 16: Downloads / Exports ----------------------------
+# ---------------------------- Tab 16: SNP Mapping ----------------------------
 with tabs[15]:
+    st.header("SNP Mapping")
+    st.write("Upload or preview SNP CSV. Required column: `Protein`. Optional columns: `SNP`/`SNP_ID`, `Effect`, `Chromosome`, `Position`, `Ref`, `Alt`.")
+    snp_upload = st.file_uploader("Upload SNP CSV here (or upload earlier in Upload tab)", type=["csv"], key="snp_upload")
+    if snp_upload is not None:
+        try:
+            snp_df = load_snp_df(snp_upload)
+            st.session_state['snp_df'] = snp_df
+            st.session_state['snp_dict'] = build_snp_dict_from_df(snp_df)
+            st.success("SNP CSV loaded into session.")
+        except Exception as e:
+            st.error(f"Failed to read SNP CSV: {e}")
+    if 'snp_df' in st.session_state:
+        st.subheader("Uploaded SNPs (preview)")
+        st.dataframe(st.session_state['snp_df'].head(200))
+    else:
+        st.info("No SNPs uploaded yet.")
+
+# ---------------------------- Tab 17: SNP Effects Explorer ----------------------------
+with tabs[16]:
+    st.header("SNP Effects Explorer")
+    if 'snp_df' not in st.session_state:
+        st.info("Upload SNPs in the 'SNP Mapping' tab (or Upload tab) to explore effects.")
+    elif 'G' not in st.session_state:
+        st.info("Build or load a network (Upload FASTA or STRING Network tab) so we can merge SNPs with network metrics.")
+    else:
+        snp_df = st.session_state['snp_df'].copy()
+        G = st.session_state['G']
+        # compute centralities once
+        betweenness = nx.betweenness_centrality(G)
+        closeness = nx.closeness_centrality(G)
+        degree_dict = dict(G.degree())
+        # Prepare merged table rows
+        rows = []
+        for _, row in snp_df.iterrows():
+            prot = str(row.get('Protein', '')).strip()
+            if prot == "" or prot not in G.nodes():
+                # include unmatched proteins too (optional)
+                rows.append({
+                    'Protein': prot,
+                    'SNP': row.get('SNP', row.get('SNP_ID', np.nan)),
+                    'Effect': row.get('Effect', np.nan),
+                    'Chromosome': row.get('Chromosome', np.nan),
+                    'Position': row.get('Position', np.nan),
+                    'Ref': row.get('Ref', np.nan),
+                    'Alt': row.get('Alt', np.nan),
+                    'InNetwork': False,
+                    'Degree': np.nan,
+                    'Closeness': np.nan,
+                    'Betweenness': np.nan,
+                    'STKDD': np.nan,
+                    'PVI': np.nan
+                })
+                continue
+            deg = degree_dict.get(prot, 0)
+            clos = closeness.get(prot, 0)
+            betw = betweenness.get(prot, 0)
+            stkdd = st.session_state['stkdd_dict'].get(prot, 0)
+            pvi = st.session_state['pvi_dict'].get(prot, 0)
+            rows.append({
+                'Protein': prot,
+                'SNP': row.get('SNP', row.get('SNP_ID', np.nan)),
+                'Effect': row.get('Effect', np.nan),
+                'Chromosome': row.get('Chromosome', np.nan),
+                'Position': row.get('Position', np.nan),
+                'Ref': row.get('Ref', np.nan),
+                'Alt': row.get('Alt', np.nan),
+                'InNetwork': True,
+                'Degree': deg,
+                'Closeness': round(clos,6),
+                'Betweenness': round(betw,6),
+                'STKDD': round(stkdd,6),
+                'PVI': round(pvi,6)
+            })
+        merged_df = pd.DataFrame(rows)
+        st.subheader("Detailed SNPs merged with Network Metrics")
+        st.dataframe(merged_df)
+
+        # Visualization 1: Count of SNP Effects
+        if 'Effect' in merged_df.columns:
+            effect_counts = merged_df['Effect'].fillna('Unknown').value_counts().reset_index()
+            effect_counts.columns = ['Effect','Count']
+            st.subheader("SNP Effect Counts")
+            fig1 = px.bar(effect_counts, x='Effect', y='Count', title="Counts of SNP Effects", text='Count')
+            st.plotly_chart(fig1, use_container_width=True)
+
+        # Visualization 2: PVI of proteins that have SNPs (sorted)
+        df_in_network = merged_df[merged_df['InNetwork']==True].copy()
+        if not df_in_network.empty:
+            pvi_by_prot = df_in_network.groupby('Protein')['PVI'].first().reset_index().sort_values('PVI', ascending=False)
+            st.subheader("PVI for Proteins with SNPs (top 30)")
+            fig2 = px.bar(pvi_by_prot.head(30), x='Protein', y='PVI', title="PVI (proteins with SNPs)", text='PVI')
+            fig2.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("No SNPs mapped to network proteins — check Protein column values in your SNP CSV.")
+
+# ---------------------------- Tab 18: Downloads / Exports ----------------------------
+with tabs[17]:
     st.header("Download Metrics & Graph Data")
     if 'metrics' in st.session_state:
         csv = st.session_state['metrics'].to_csv(index=False).encode()
@@ -486,3 +593,6 @@ with tabs[15]:
     if 'df_edges' in st.session_state:
         csv_edges = st.session_state['df_edges'].to_csv(index=False).encode()
         st.download_button(label="Download Edge List CSV", data=csv_edges, file_name='edges.csv', mime='text/csv')
+    if 'snp_df' in st.session_state:
+        csv_snp = st.session_state['snp_df'].to_csv(index=False).encode()
+        st.download_button(label="Download Uploaded SNPs CSV", data=csv_snp, file_name='snp_uploaded.csv', mime='text/csv')
